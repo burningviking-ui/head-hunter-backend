@@ -113,6 +113,9 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'HEAD-HUNTER EBS' });
 });
 
+// Extension ID for HEAD-HUNTER
+const EXTENSION_ID = 'syw6rysu5tf8znr3f97k16pcv9u9wg';
+
 // ─── GET /api/lookup?username=xyz ─────────────────────────
 app.get('/api/lookup', async (req, res) => {
   const username = (req.query.username || '').trim().toLowerCase();
@@ -134,7 +137,24 @@ app.get('/api/lookup', async (req, res) => {
     const user       = userData.data   && userData.data[0];
     const stream     = streamData.data && streamData.data[0];
 
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) return res.status(404).json({ found: false, error: 'User not found' });
+
+    // Check if target has HEAD-HUNTER extension installed
+    let hasExtension = false;
+    try {
+      const extRes  = await fetch('https://api.twitch.tv/helix/users/extensions?user_id=' + user.id, {
+        headers: { 'Authorization': 'Bearer ' + token, 'Client-Id': process.env.TWITCH_CLIENT_ID }
+      });
+      const extData = await extRes.json();
+      if (extData.data) {
+        const allExts = Object.values(extData.data).reduce(function(all, slot) {
+          return all.concat(Object.values(slot));
+        }, []);
+        hasExtension = allExts.some(function(ext) { return ext.id === EXTENSION_ID && ext.active; });
+      }
+    } catch (extErr) {
+      console.warn('[lookup] Extension check failed (non-fatal):', extErr.message);
+    }
 
     res.json({
       found:         true,
@@ -145,7 +165,8 @@ app.get('/api/lookup', async (req, res) => {
       is_live:       !!stream,
       viewer_count:  stream ? stream.viewer_count : 0,
       game:          stream ? stream.game_name    : null,
-      title:         stream ? stream.title        : null
+      title:         stream ? stream.title        : null,
+      has_extension: hasExtension
     });
   } catch (err) {
     console.error('[lookup] Error:', err.message);
