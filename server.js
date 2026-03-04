@@ -361,33 +361,56 @@ app.post('/api/subscribe-channel-points', async (req, res) => {
 });
 
 // ─── POST /api/payout ─────────────────────────────────
-// Sends a chat message to the target's channel when bounty is paid out
+// Sends a chat message when bounty is paid out
 app.post('/api/payout', async (req, res) => {
-  const { target, reward, count } = req.body || {};
+  const { target, reward, hunter, count, broadcaster } = req.body || {};
   if (!target || !reward) return res.status(400).json({ error: 'target and reward required' });
 
-  const bountyWord = count && count > 1 ? count + ' bounties' : 'bounty';
+  const bountyWord  = count && count > 1 ? count + ' bounties' : 'bounty';
+  const hunterLabel = hunter && hunter !== 'A hunter' ? '@' + hunter : 'a hunter';
   const chatMsg = '☠ HEAD-HUNTER — BOUNTY COMPLETED! '
-    + 'The ' + bountyWord + ' on @' + target + ' has been claimed and paid out! '
-    + 'Total reward: ' + reward + ' — To the victor goes the spoils - BOUNTY COMPLETED!';
+    + 'The ' + bountyWord + ' on @' + target + ' has been claimed by ' + hunterLabel + '! '
+    + 'Prize: ' + reward + ' — To the victor goes the spoils - BOUNTY COMPLETED!';
 
   var chatResult = 'not_sent';
 
+  // Send to broadcaster's channel (where the extension lives) AND target's channel
+  const channelsToNotify = [];
   try {
     if (!botToken || !botUserId) {
       chatResult = 'bot_not_configured';
     } else {
+      // Always notify the target's channel
       const targetUser = await getUserId(target);
-      if (!targetUser) {
+      if (targetUser) channelsToNotify.push({ id: targetUser.id, name: target });
+
+      // Also notify the broadcaster's channel if provided and different
+      if (broadcaster && broadcaster.toLowerCase() !== target.toLowerCase()) {
+        const bcUser = await getUserId(broadcaster);
+        if (bcUser) channelsToNotify.push({ id: bcUser.id, name: broadcaster });
+      }
+
+      if (channelsToNotify.length === 0) {
         chatResult = 'user_not_found';
       } else {
-        let chatRes = await sendChatMessage(targetUser.id, chatMsg, botToken);
-        if (chatRes.status === 401) {
-          const newToken = await refreshBotToken();
-          chatRes = await sendChatMessage(targetUser.id, chatMsg, newToken);
+        var anyFailed = false;
+        for (var i = 0; i < channelsToNotify.length; i++) {
+          var ch = channelsToNotify[i];
+          let chatRes = await sendChatMessage(ch.id, chatMsg, botToken);
+          if (chatRes.status === 401) {
+            console.log('[payout] 401 — refreshing bot token...');
+            const newToken = await refreshBotToken();
+            chatRes = await sendChatMessage(ch.id, chatMsg, newToken);
+          }
+          if (chatRes.status === 200 || chatRes.status === 204) {
+            console.log('[payout] Chat sent to ' + ch.name + ': sent');
+          } else {
+            const errBody = await chatRes.text();
+            console.error('[payout] Chat FAILED to ' + ch.name + ' — status:', chatRes.status, '— body:', errBody);
+            anyFailed = true;
+          }
         }
-        chatResult = (chatRes.status === 200 || chatRes.status === 204) ? 'sent' : 'failed';
-        console.log('[payout] Chat sent to ' + target + ':', chatResult);
+        chatResult = anyFailed ? 'partial' : 'sent';
       }
     }
   } catch (err) {
