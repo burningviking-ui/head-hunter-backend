@@ -78,7 +78,8 @@ async function initDb() {
         total_reward   TEXT NOT NULL,
         clip_url       TEXT NOT NULL,
         platform       TEXT DEFAULT 'TWITCH',
-        submitted_by   TEXT,
+        submitted_by       TEXT,
+        submitted_by_login TEXT,
         submitted_at   TIMESTAMPTZ DEFAULT NOW(),
         status         TEXT DEFAULT 'review',
         approves       INTEGER DEFAULT 0,
@@ -229,7 +230,26 @@ const EXTENSION_ID = 'syw6rysu5tf8znr3f97k16pcv9u9wg';
 // ─── GET /api/lookup?username=xyz ─────────────────────────
 app.get('/api/lookup', async (req, res) => {
   const username = (req.query.username || '').trim().toLowerCase();
-  if (!username) return res.status(400).json({ error: 'username required' });
+  const userId   = (req.query.id || '').trim();
+
+  if (!username && !userId) return res.status(400).json({ error: 'username or id required' });
+
+  // Quick ID-only lookup — just returns login name, no stream data needed
+  if (userId && !username) {
+    try {
+      const token = await getAppToken();
+      const r = await fetch('https://api.twitch.tv/helix/users?id=' + encodeURIComponent(userId), {
+        headers: { 'Authorization': 'Bearer ' + token, 'Client-Id': process.env.TWITCH_CLIENT_ID }
+      });
+      const d = await r.json();
+      if (d.data && d.data[0]) {
+        return res.json({ found: true, id: d.data[0].id, login: d.data[0].login, display_name: d.data[0].display_name });
+      }
+      return res.status(404).json({ found: false, error: 'User not found' });
+    } catch(err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
 
   try {
     const token = await getAppToken();
@@ -744,9 +764,9 @@ app.post('/api/network/submission', async (req, res) => {
   const voteClosesAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
   try {
     await pool.query(`
-      INSERT INTO network_submissions (id,contract_id,channel_id,target,game,total_reward,clip_url,platform,submitted_by,vote_closes_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-    `, [id, contract_id, channel_id || '', target, game || '', total_reward || '', clip_url, platform || 'TWITCH', submitted_by || null, voteClosesAt]);
+      INSERT INTO network_submissions (id,contract_id,channel_id,target,game,total_reward,clip_url,platform,submitted_by,submitted_by_login,vote_closes_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    `, [id, contract_id, channel_id || '', target, game || '', total_reward || '', clip_url, platform || 'TWITCH', submitted_by || null, req.body.submitted_by_login || null, voteClosesAt]);
     res.json({ success: true, id, vote_closes_at: voteClosesAt });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
