@@ -12,7 +12,9 @@ const fetch   = require('node-fetch');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+app.use(express.json({
+  verify: function(req, res, buf) { req.rawBody = buf.toString(); }
+}));
 app.use(cors({
   origin: [
     /\.twitch\.tv$/,
@@ -102,6 +104,27 @@ async function sendChatMessage(broadcasterUserId, message, token) {
       message:        message
     })
   });
+}
+
+// ─── CHANNEL POINTS REDEMPTION STORE ─────────────────────
+// In-memory store: { channelId: [ redemption, ... ] }
+// Free Render tier has no persistent disk, so this resets on redeploy
+// Redemptions are consumed by the extension polling /api/redemptions
+var pendingRedemptions = {};
+
+// ─── EVENTSUB WEBHOOK SECRET ──────────────────────────────
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'headhunter-secret';
+
+// Verify Twitch EventSub signature
+function verifyTwitchSignature(req) {
+  const msgId        = req.headers['twitch-eventsub-message-id']        || '';
+  const msgTimestamp = req.headers['twitch-eventsub-message-timestamp']  || '';
+  const msgSignature = req.headers['twitch-eventsub-message-signature']  || '';
+  const body         = req.rawBody || '';
+  const hmacMsg      = msgId + msgTimestamp + body;
+  const crypto       = require('crypto');
+  const expected     = 'sha256=' + crypto.createHmac('sha256', WEBHOOK_SECRET).update(hmacMsg).digest('hex');
+  return expected === msgSignature;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -224,6 +247,151 @@ app.post('/api/contract', async (req, res) => {
     }
   } catch (err) {
     console.error('[contract] Chat error (non-fatal):', err.message);
+    chatResult = 'error';
+  }
+
+  res.json({ success: true, target, chat: chatResult });
+});
+
+// ─── POST /api/eventsub ───────────────────────────────────
+// Receives Twitch EventSub channel point redemption webhooks
+app.post('/api/eventsub', (req, res) => {
+  const msgType = req.headers['twitch-eventsub-message-type'];
+
+  // Verify signature
+  if (!verifyTwitchSignature(req)) {
+    console.warn('[eventsub] Invalid signature — rejected');
+    return res.status(403).send('Forbidden');
+  }
+
+  // Respond to challenge (subscription verification)
+  if (msgType === 'webhook_callback_verification') {
+    console.log('[eventsub] Subscription verified');
+    return res.status(200).send(req.body.challenge);
+  }
+
+  // Revocation
+  if (msgType === 'revocation') {
+    console.log('[eventsub] Subscription revoked');
+    return res.sendStatus(204);
+  }
+
+  // Handle notification
+  if (msgType === 'notification') {
+    const event = req.body.event;
+    if (event && event.reward) {
+      const channelId = event.broadcaster_user_id;
+      const userName  = event.user_name || event.user_login;
+      const rewardTitle = event.reward.title || '';
+
+      // Only process HEAD-HUNTER rewards
+      if (rewardTitle.toLowerCase().indexOf('head-hunter') !== -1 ||
+          rewardTitle.toLowerCase().indexOf('headhunter')  !== -1 ||
+          rewardTitle.toLowerCase().indexOf('bounty')      !== -1) {
+
+        if (!pendingRedemptions[channelId]) pendingRedemptions[channelId] = [];
+        pendingRedemptions[channelId].push({
+          id:          event.id,
+          redeemedBy:  userName,
+          rewardTitle: rewardTitle,
+          rewardCost:  event.reward.cost,
+          userInput:   event.user_input || '',
+          redeemedAt:  Date.now()
+        });
+        console.log('[eventsub] Channel points redemption stored for channel', channelId, 'by', userName);
+      }
+    }
+    return res.sendStatus(204);
+  }
+
+  res.sendStatus(204);
+});
+
+// ─── GET /api/redemptions?channel_id=xyz ─────────────────
+// Extension polls this to check for pending channel point bounties
+app.get('/api/redemptions', (req, res) => {
+  const channelId = req.query.channel_id;
+  if (!channelId) return res.status(400).json({ error: 'channel_id required' });
+
+  const items = pendingRedemptions[channelId] || [];
+  // Return and clear pending redemptions for this channel
+  pendingRedemptions[channelId] = [];
+  res.json({ redemptions: items });
+});
+
+// ─── POST /api/subscribe-channel-points ──────────────────
+// Broadcaster calls this once to register EventSub subscription
+app.post('/api/subscribe-channel-points', async (req, res) => {
+  const { broadcaster_id } = req.body || {};
+  if (!broadcaster_id) return res.status(400).json({ error: 'broadcaster_id required' });
+
+  const callbackUrl = (process.env.RENDER_EXTERNAL_URL || 'https://head-hunter-backend.onrender.com') + '/api/eventsub';
+
+  try {
+    const token = await getAppToken();
+    const subRes = await fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Client-Id':     process.env.TWITCH_CLIENT_ID,
+        'Content-Type':  'application/json'
+      },
+      body: JSON.stringify({
+        type:      'channel.channel_points_custom_reward_redemption.add',
+        version:   '1',
+        condition: { broadcaster_user_id: broadcaster_id },
+        transport: {
+          method:   'webhook',
+          callback: callbackUrl,
+          secret:   WEBHOOK_SECRET
+        }
+      })
+    });
+    const data = await subRes.json();
+    if (data.error) {
+      console.error('[subscribe] Failed:', data);
+      return res.status(400).json({ error: data.message || 'Subscription failed', detail: data });
+    }
+    console.log('[subscribe] EventSub subscription created for', broadcaster_id);
+    res.json({ success: true, subscription: data.data && data.data[0] });
+  } catch (err) {
+    console.error('[subscribe] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/payout ─────────────────────────────────
+// Sends a chat message to the target's channel when bounty is paid out
+app.post('/api/payout', async (req, res) => {
+  const { target, reward, count } = req.body || {};
+  if (!target || !reward) return res.status(400).json({ error: 'target and reward required' });
+
+  const bountyWord = count && count > 1 ? count + ' bounties' : 'bounty';
+  const chatMsg = '☠ HEAD-HUNTER — BOUNTY COMPLETED! '
+    + 'The ' + bountyWord + ' on @' + target + ' has been claimed and paid out! '
+    + 'Total reward: ' + reward + ' — To the victor goes the spoils - BOUNTY COMPLETED!';
+
+  var chatResult = 'not_sent';
+
+  try {
+    if (!botToken || !botUserId) {
+      chatResult = 'bot_not_configured';
+    } else {
+      const targetUser = await getUserId(target);
+      if (!targetUser) {
+        chatResult = 'user_not_found';
+      } else {
+        let chatRes = await sendChatMessage(targetUser.id, chatMsg, botToken);
+        if (chatRes.status === 401) {
+          const newToken = await refreshBotToken();
+          chatRes = await sendChatMessage(targetUser.id, chatMsg, newToken);
+        }
+        chatResult = (chatRes.status === 200 || chatRes.status === 204) ? 'sent' : 'failed';
+        console.log('[payout] Chat sent to ' + target + ':', chatResult);
+      }
+    }
+  } catch (err) {
+    console.error('[payout] Error:', err.message);
     chatResult = 'error';
   }
 
