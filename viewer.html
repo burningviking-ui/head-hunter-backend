@@ -1,0 +1,1138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HEAD-HUNTER</title>
+<script src="https://extension-files.twitch.tv/helper/v1/twitch-ext.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Special+Elite&family=Oswald:wght@300;400;500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --blood: #8b1a1a;
+    --blood-bright: #c0392b;
+    --blood-dim: #4a0e0e;
+    --rust: #b5451b;
+    --paper: #1a1208;
+    --paper2: #1f1610;
+    --paper3: #251c12;
+    --border: #3d2a14;
+    --text: #c8a96e;
+    --text-dim: #7a6040;
+    --text-bright: #e8d5a3;
+    --white: #f0e6cc;
+    --green: #2ecc71;
+    --bits: #9b59b6;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--text);
+    font-family: 'Oswald', sans-serif;
+    min-height: 500px;
+    height: auto;
+    background-image:
+      radial-gradient(ellipse at 50% 0%, rgba(139,26,26,0.08) 0%, transparent 60%),
+      repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+    position: relative;
+    overflow-x: hidden;
+  }
+
+  /* Scanline effect */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0,0,0,0) 0px,
+      rgba(0,0,0,0) 3px,
+      rgba(0,0,0,0.04) 3px,
+      rgba(0,0,0,0.04) 4px
+    );
+    pointer-events: none;
+    z-index: 999;
+  }
+
+  /* HEADER */
+  .header {
+    background: var(--blood);
+    padding: 10px 14px 8px;
+    position: relative;
+    overflow: hidden;
+    border-bottom: 3px solid var(--blood-dim);
+  }
+  .header::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 8px,
+      rgba(0,0,0,0.08) 8px,
+      rgba(0,0,0,0.08) 9px
+    );
+  }
+  .header-inner { position: relative; z-index: 1; }
+  .header-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 2px;
+  }
+  .header h1 {
+    font-family: 'Special Elite', cursive;
+    font-size: 22px;
+    color: #fff;
+    letter-spacing: 3px;
+    text-shadow: 2px 2px 0 rgba(0,0,0,0.5);
+  }
+  .live-badge {
+    background: var(--blood-dim);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #fff;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    padding: 3px 7px;
+    letter-spacing: 2px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .live-dot {
+    width: 5px; height: 5px;
+    background: #ff4444;
+    border-radius: 50%;
+    animation: blink 1.2s ease-in-out infinite;
+  }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
+  .header-sub {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: rgba(255,255,255,0.5);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  /* TABS */
+  .tabs {
+    display: flex;
+    background: var(--paper2);
+    border-bottom: 2px solid var(--border);
+  }
+  .tab {
+    flex: 1;
+    padding: 9px 4px;
+    text-align: center;
+    font-family: 'Oswald', sans-serif;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-right: 1px solid var(--border);
+    transition: all 0.15s;
+    position: relative;
+  }
+  .tab:last-child { border-right: none; }
+  .tab:hover { color: var(--text); background: rgba(139,26,26,0.1); }
+  .tab.active {
+    color: var(--white);
+    background: rgba(139,26,26,0.2);
+  }
+  .tab.active::after {
+    content: '';
+    position: absolute;
+    bottom: -2px;
+    left: 0; right: 0;
+    height: 2px;
+    background: var(--blood-bright);
+  }
+  .tab-badge {
+    background: var(--blood);
+    color: #fff;
+    font-size: 8px;
+    padding: 1px 5px;
+    border-radius: 2px;
+    margin-left: 4px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+
+  /* PANELS */
+  .panel { display: none; padding: 12px; }
+  .panel.active { display: block; }
+
+  /* WANTED CARD */
+  .wanted-card {
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    margin-bottom: 10px;
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .wanted-card:hover { border-color: var(--blood); }
+  .wanted-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+  }
+  .wanted-card.high::before { background: #ff4444; }
+  .wanted-card.med::before { background: var(--rust); }
+  .wanted-card.low::before { background: var(--text-dim); }
+
+  .card-top {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .card-wanted-label {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    transform: rotate(180deg);
+    background: var(--blood-dim);
+    color: rgba(255,255,255,0.6);
+    font-family: 'Special Elite', cursive;
+    font-size: 8px;
+    letter-spacing: 3px;
+    padding: 8px 5px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+  }
+
+  .card-avatar {
+    width: 52px;
+    height: 52px;
+    background: var(--paper3);
+    border-right: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 26px;
+    flex-shrink: 0;
+    position: relative;
+    overflow: hidden;
+  }
+  .card-avatar::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, transparent 60%, rgba(139,26,26,0.2));
+  }
+
+  .card-info {
+    flex: 1;
+    padding: 8px 10px;
+    min-width: 0;
+  }
+  .card-gamertag {
+    font-family: 'Special Elite', cursive;
+    font-size: 15px;
+    color: var(--white);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+  }
+  .card-game {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .card-reward-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .reward-chip {
+    font-family: 'Oswald', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border: 1px solid;
+    letter-spacing: 1px;
+  }
+  .reward-chip.cash { color: var(--green); border-color: rgba(46,204,113,0.4); background: rgba(46,204,113,0.07); }
+  .reward-chip.bits { color: #c39bd3; border-color: rgba(155,89,182,0.4); background: rgba(155,89,182,0.07); }
+  .reward-chip.points { color: var(--text); border-color: var(--border); }
+
+  .card-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-left: 1px solid var(--border);
+    flex-shrink: 0;
+    min-width: 72px;
+  }
+  .danger-level {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .danger-level.high { color: #ff4444; }
+  .danger-level.med { color: var(--rust); }
+  .danger-level.low { color: var(--text-dim); }
+
+  .card-timer {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    text-align: right;
+  }
+
+  .card-expanded {
+    display: none;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: rgba(0,0,0,0.2);
+  }
+  .card-expanded.open { display: block; }
+  .expand-section { margin-bottom: 10px; }
+  .expand-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--blood-bright);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 5px;
+  }
+  .expand-text {
+    font-family: 'Special Elite', cursive;
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .placer-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  .placer-row .placer { color: var(--text); }
+  .claim-btn {
+    width: 100%;
+    background: var(--blood-dim);
+    border: 1px solid var(--blood);
+    color: #fff;
+    font-family: 'Oswald', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 3px;
+    padding: 9px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.15s;
+  }
+  .claim-btn:hover { background: var(--blood); }
+
+  /* PLACE BOUNTY */
+  .place-section {
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    border-top: 2px solid var(--blood);
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  .place-header {
+    font-family: 'Special Elite', cursive;
+    font-size: 16px;
+    color: var(--white);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .place-header::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+  .field-group { margin-bottom: 10px; }
+  .field-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--blood-bright);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+    display: block;
+  }
+  .field-input, .field-select {
+    width: 100%;
+    background: var(--paper);
+    border: 1px solid var(--border);
+    color: var(--text-bright);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    padding: 8px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .field-input:focus, .field-select:focus { border-color: var(--blood); }
+  .field-select option { background: var(--paper); }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+
+  .payment-tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .pay-tab {
+    flex: 1;
+    background: var(--paper);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-family: 'Oswald', sans-serif;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 2px;
+    padding: 7px 4px;
+    text-align: center;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.15s;
+  }
+  .pay-tab.active.bits-tab { border-color: var(--bits); color: #c39bd3; background: rgba(155,89,182,0.08); }
+  .pay-tab.active.cash-tab { border-color: var(--green); color: var(--green); background: rgba(46,204,113,0.06); }
+  .pay-tab:not(.active):hover { border-color: var(--text-dim); color: var(--text); }
+
+  .pay-panel { display: none; }
+  .pay-panel.active { display: block; }
+
+  .bits-presets {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+  }
+  .bits-preset {
+    background: var(--paper);
+    border: 1px solid rgba(155,89,182,0.3);
+    color: #c39bd3;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    padding: 5px 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .bits-preset:hover, .bits-preset.selected {
+    background: rgba(155,89,182,0.15);
+    border-color: var(--bits);
+  }
+
+  .post-btn {
+    width: 100%;
+    background: var(--blood);
+    border: none;
+    color: #fff;
+    font-family: 'Oswald', sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    padding: 12px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.15s;
+    position: relative;
+    overflow: hidden;
+  }
+  .post-btn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(0,0,0,0.1) 6px, rgba(0,0,0,0.1) 7px);
+  }
+  .post-btn:hover { background: var(--blood-bright); }
+  .post-btn span { position: relative; z-index: 1; }
+
+  /* LEADERBOARD */
+  .lb-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .lb-title {
+    font-family: 'Special Elite', cursive;
+    font-size: 15px;
+    color: var(--white);
+  }
+  .lb-period {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+  }
+  .lb-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border-bottom: 1px solid rgba(61,42,20,0.5);
+    transition: background 0.1s;
+  }
+  .lb-row:hover { background: rgba(139,26,26,0.06); }
+  .lb-row:last-child { border-bottom: none; }
+  .lb-rank {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    width: 22px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .lb-rank.r1 { color: #ffd700; }
+  .lb-rank.r2 { color: #c0c0c0; }
+  .lb-rank.r3 { color: #cd7f32; }
+  .lb-name {
+    flex: 1;
+    font-family: 'Special Elite', cursive;
+    font-size: 14px;
+    color: var(--text-bright);
+  }
+  .lb-kills {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    text-align: right;
+  }
+  .lb-earned {
+    font-family: 'Oswald', sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--green);
+    min-width: 60px;
+    text-align: right;
+  }
+  .lb-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+  }
+
+  /* SUBMIT PANEL */
+  .submit-wrap {
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    border-top: 2px solid var(--blood);
+    padding: 14px;
+  }
+  .submit-title {
+    font-family: 'Special Elite', cursive;
+    font-size: 16px;
+    color: var(--white);
+    margin-bottom: 12px;
+  }
+  .clip-drop {
+    border: 2px dashed var(--border);
+    background: var(--paper);
+    padding: 20px;
+    text-align: center;
+    cursor: pointer;
+    margin-bottom: 10px;
+    transition: border-color 0.15s;
+  }
+  .clip-drop:hover { border-color: var(--blood); }
+  .clip-drop-icon { font-size: 28px; margin-bottom: 6px; opacity: 0.5; }
+  .clip-drop-text {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+  }
+  .or-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+  }
+  .or-row::before, .or-row::after {
+    content: ''; flex: 1; height: 1px; background: var(--border);
+  }
+
+  /* PLATFORM TABS */
+  .platform-tabs {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+  .plat-tab {
+    flex: 1;
+    min-width: 60px;
+    background: var(--paper);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    padding: 7px 6px;
+    text-align: center;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .plat-tab:hover { border-color: var(--text-dim); color: var(--text); }
+  .plat-tab.active.twitch  { border-color: #9b59b6; color: #c39bd3; background: rgba(155,89,182,0.1); }
+  .plat-tab.active.youtube { border-color: #e74c3c; color: #ff6b6b; background: rgba(231,76,60,0.1); }
+  .plat-tab.active.twitter { border-color: #1da1f2; color: #5dade2; background: rgba(29,161,242,0.1); }
+  .plat-tab.active.other   { border-color: var(--text-dim); color: var(--text); background: rgba(200,169,110,0.06); }
+  .url-hint {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    margin-top: 4px;
+  }
+  /* VOTE CARDS */
+  .vote-card {
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--blood);
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+  .vc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+  .vc-target { font-family: 'Special Elite', cursive; font-size: 15px; color: var(--white); }
+  .vc-reward { font-family: 'Oswald', sans-serif; font-weight: 700; font-size: 13px; color: var(--green); text-align: right; flex-shrink: 0; margin-left: 8px; }
+  .vc-meta { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-dim); letter-spacing: 1px; margin-bottom: 8px; }
+  .vc-hunter { color: var(--text); }
+  .vc-plat { font-size: 8px; padding: 1px 5px; border: 1px solid; letter-spacing: 1px; }
+  .vc-plat.twitch  { color: #c39bd3; border-color: rgba(155,89,182,0.4); }
+  .vc-plat.youtube { color: #ff6b6b; border-color: rgba(231,76,60,0.4); }
+  .vc-plat.twitter { color: #5dade2; border-color: rgba(29,161,242,0.4); }
+  .vc-plat.other   { color: var(--text-dim); border-color: var(--border); }
+  .vc-clip-link {
+    display: block; font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-dim);
+    text-decoration: none; background: var(--paper); border: 1px solid var(--border);
+    padding: 7px 10px; margin-bottom: 10px; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; transition: all 0.15s;
+  }
+  .vc-clip-link:hover { color: var(--text); border-color: var(--text-dim); }
+  .vc-tally { margin-bottom: 10px; }
+  .vc-tally-label { display: flex; justify-content: space-between; font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-dim); margin-bottom: 4px; letter-spacing: 1px; }
+  .vc-bar-bg { background: var(--paper); border: 1px solid var(--border); height: 5px; overflow: hidden; }
+  .vc-bar-fill { height: 100%; background: linear-gradient(90deg, var(--blood-dim), var(--blood-bright)); transition: width 0.4s ease; }
+  .vc-actions { display: flex; gap: 8px; }
+  .vc-btn {
+    flex: 1; background: transparent; font-family: 'Oswald', sans-serif; font-size: 12px;
+    font-weight: 700; letter-spacing: 3px; padding: 10px; cursor: pointer;
+    text-transform: uppercase; border: 1px solid; transition: all 0.15s;
+  }
+  .vc-btn.approve { border-color: var(--green); color: var(--green); }
+  .vc-btn.approve:hover { background: rgba(46,204,113,0.12); }
+  .vc-btn.reject  { border-color: var(--blood-bright); color: var(--blood-bright); }
+  .vc-btn.reject:hover  { background: rgba(192,57,43,0.12); }
+  .vc-voted { font-family: 'Share Tech Mono', monospace; font-size: 10px; letter-spacing: 2px; padding: 8px; text-align: center; border: 1px solid; margin-top: 0; }
+  .vc-voted.approve { color: var(--green); border-color: rgba(46,204,113,0.3); background: rgba(46,204,113,0.05); }
+  .vc-voted.reject  { color: var(--blood-bright); border-color: rgba(192,57,43,0.3); background: rgba(192,57,43,0.05); }
+  .empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-dim);
+  }
+  .empty-icon {
+    font-size: 32px;
+    opacity: 0.2;
+    margin-bottom: 10px;
+  }
+  .empty-text {
+    font-family: 'Oswald', sans-serif;
+    font-size: 14px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .empty-sub {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--text-dim);
+    opacity: 0.6;
+  }
+
+  .vote-empty { text-align: center; padding: 30px 20px; color: var(--text-dim); font-family: 'Share Tech Mono', monospace; font-size: 10px; letter-spacing: 2px; }
+
+  .pending-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    background: var(--paper);
+    margin-bottom: 6px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+  }
+  .pending-target { color: var(--text-bright); }
+  .pending-status {
+    padding: 2px 8px;
+    font-size: 9px;
+    letter-spacing: 1px;
+  }
+  .pending-status.review { color: var(--rust); border: 1px solid rgba(181,69,27,0.4); }
+  .pending-status.approved { color: var(--green); border: 1px solid rgba(46,204,113,0.4); }
+
+  /* NOTIFICATION */
+  .toast {
+    position: fixed;
+    bottom: 14px;
+    left: 12px; right: 12px;
+    background: var(--blood-dim);
+    border: 1px solid var(--blood);
+    border-left: 3px solid var(--blood-bright);
+    color: var(--white);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    padding: 10px 14px;
+    letter-spacing: 1px;
+    transform: translateY(60px);
+    transition: transform 0.25s ease;
+    z-index: 100;
+  }
+  .toast.show { transform: translateY(0); }
+
+  .section-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--blood-bright);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  /* LIVE / OFFLINE BADGES */
+  .streamer-live {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    color: #ff4444;
+    letter-spacing: 1px;
+    animation: blink 1.5s ease infinite;
+  }
+  .streamer-offline {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+  }
+  .twitch-link {
+    color: var(--text-dim);
+    font-size: 9px;
+    text-decoration: none;
+    transition: color 0.15s;
+  }
+  .twitch-link:hover { color: #9b59b6; }
+
+  /* NOTIFY TAGS */
+  .notify-tag {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 1px;
+    padding: 1px 6px;
+    border: 1px solid;
+  }
+  .notify-tag.notified { color: #f39c12; border-color: rgba(243,156,18,0.4); }
+  .notify-tag.silent { color: var(--text-dim); border-color: var(--border); }
+
+  /* LOOKUP ROW */
+  .lookup-row {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+    margin-bottom: 10px;
+  }
+  .lookup-btn {
+    background: var(--blood-dim);
+    border: 1px solid var(--blood);
+    color: var(--white);
+    font-family: 'Oswald', sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    padding: 0 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+  .lookup-btn:hover { background: var(--blood); }
+
+  /* STREAMER PROFILE PREVIEW */
+  .streamer-profile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--paper);
+    border: 1px solid var(--blood-dim);
+    border-left: 3px solid var(--blood-bright);
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    animation: fadeIn 0.2s ease;
+  }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
+  .sp-avatar {
+    font-size: 28px;
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-size: cover;
+    background-position: center;
+    overflow: hidden;
+  }
+  .sp-name {
+    font-family: 'Special Elite', cursive;
+    font-size: 16px;
+    color: var(--white);
+    margin-bottom: 2px;
+  }
+  .sp-status {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 1px;
+    margin-bottom: 2px;
+  }
+  .sp-status.live { color: #ff4444; }
+  .sp-status.offline { color: var(--text-dim); }
+  .sp-link {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: #9b59b6;
+    letter-spacing: 1px;
+  }
+  .lookup-error {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--blood-bright);
+    letter-spacing: 1px;
+    padding: 8px 10px;
+    border: 1px solid var(--blood-dim);
+    background: rgba(139,26,26,0.1);
+    margin-bottom: 10px;
+  }
+
+  /* NOTIFY TOGGLE */
+  .survival-payout {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: #2ecc71;
+    letter-spacing: 1px;
+    padding: 7px 10px;
+    border: 1px solid rgba(46,204,113,0.25);
+    background: rgba(46,204,113,0.05);
+    margin-bottom: 8px;
+  }
+  .survival-payout strong { color: #5dfc9a; }
+  .survival-payout.no-expiry { color: var(--text-dim); border-color: var(--border); background: transparent; }
+
+  .notify-mandatory {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: #f39c12;
+    letter-spacing: 1px;
+    padding: 7px 10px;
+    border: 1px solid rgba(243,156,18,0.3);
+    background: rgba(243,156,18,0.05);
+    margin-bottom: 10px;
+  }
+  .duration-wrap { position: relative; }
+
+  .claim-reward-btn {
+    display: block;
+    width: 100%;
+    padding: 12px;
+    background: var(--blood);
+    color: #fff;
+    border: 2px solid var(--blood-bright);
+    font-family: 'Oswald', sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    cursor: pointer;
+    margin-top: 8px;
+    transition: background 0.15s;
+  }
+  .claim-reward-btn:hover { background: var(--blood-bright); }
+
+  .pending-status.rejected {
+    color: #ff4444;
+    background: rgba(255,68,68,0.1);
+    border: 1px solid rgba(255,68,68,0.3);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 2px;
+    padding: 3px 8px;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-inner">
+    <div class="header-top">
+      <h1>☠ HEAD-HUNTER</h1>
+      <div class="live-badge"><div class="live-dot"></div>LIVE BOUNTIES</div>
+    </div>
+    <div class="header-sub">Mark. Hunt. Collect.</div>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active">Board</div>
+  <div class="tab">+ Place</div>
+  <div class="tab">Submit</div>
+  <div class="tab">Vote</div>
+  <div class="tab">Hunters</div>
+</div>
+
+<!-- ═══ BOARD PANEL ═══ -->
+<div class="panel active" id="panel-board">
+
+  <div class="section-label">Active Contracts</div>
+
+  <div class="empty-state">
+    <div class="empty-icon">☠</div>
+    <div class="empty-text">No active contracts</div>
+    <div class="empty-sub">Be the first to place a bounty</div>
+  </div>
+
+</div>
+
+
+<!-- ═══ PLACE BOUNTY PANEL ═══ -->
+<div class="panel" id="panel-place">
+  <div class="place-section">
+    <div class="place-header">☠ New Contract</div>
+
+    <!-- TWITCH USERNAME LOOKUP -->
+    <div class="field-group">
+      <label class="field-label">Twitch Username of Target</label>
+      <div class="lookup-row">
+        <input class="field-input" type="text" id="targetName" placeholder="e.g. xXSniperKingXx" style="margin-bottom:0;flex:1">
+        <button class="lookup-btn" id="lookupBtn">LOOK UP</button>
+      </div>
+    </div>
+
+    <!-- STREAMER PROFILE CARD (shown after lookup) -->
+    <div class="streamer-profile" id="streamerProfile" style="display:none">
+      <div class="sp-avatar" id="spAvatar">🎮</div>
+      <div class="sp-info">
+        <div class="sp-name" id="spName">—</div>
+        <div class="sp-status" id="spStatus"></div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
+          <div class="sp-link" id="spLink"></div>
+          <span id="spExtBadge" style="display:none;font-family:'Share Tech Mono',monospace;font-size:8px;color:var(--blood-bright);border:1px solid rgba(139,26,26,0.5);padding:1px 5px;letter-spacing:1px;">☠ HEAD-HUNTER</span>
+        </div>
+      </div>
+    </div>
+    <div class="lookup-error" id="lookupError" style="display:none"></div>
+
+    <div class="field-row" style="margin-top:10px">
+      <div class="field-group">
+        <label class="field-label">Game</label>
+        <input class="field-input" type="text" id="targetGame" placeholder="e.g. Warzone, Apex, Rust..." list="gamesList" autocomplete="off">
+        <datalist id="gamesList">
+          <option value="Warzone">
+          <option value="Apex Legends">
+          <option value="Fortnite">
+          <option value="Valorant">
+          <option value="CS2">
+          <option value="PUBG">
+          <option value="Overwatch 2">
+          <option value="Escape from Tarkov">
+          <option value="Rust">
+          <option value="Rainbow Six Siege">
+          <option value="Hunt: Showdown">
+          <option value="DayZ">
+          <option value="GTA Online">
+          <option value="Minecraft">
+        </datalist>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Platform</label>
+        <select class="field-select" id="platformSelect">
+          <option>PC</option>
+          <option>PS5</option>
+          <option>Xbox</option>
+          <option>Cross-platform</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field-row">
+      <div class="field-group">
+        <label class="field-label">Bounty Duration</label>
+        <div class="duration-wrap">
+          <input class="field-input" type="text" id="expiryInput" placeholder="e.g. 2 hours, 30 mins, no expiry" list="durationSuggestions" autocomplete="off" style="margin-bottom:0">
+          <datalist id="durationSuggestions">
+            <option value="30 mins">
+            <option value="1 hour">
+            <option value="2 hours">
+            <option value="4 hours">
+            <option value="8 hours">
+            <option value="12 hours">
+            <option value="24 hours">
+            <option value="No expiry">
+          </datalist>
+        </div>
+      </div>
+    </div>
+
+    <div class="notify-mandatory">
+      🔔 Target will automatically be notified via chat message when this contract goes live.
+    </div>
+
+    <div class="field-group">
+      <label class="field-label">Hit Conditions (optional)</label>
+      <input class="field-input" type="text" id="hitConditions" placeholder="e.g. kill feed must be visible, any mode...">
+    </div>
+
+    <label class="field-label" style="margin-bottom:8px">Bounty Reward</label>
+    <div class="payment-tabs">
+      <div class="pay-tab bits-tab active">Bits</div>
+      <div class="pay-tab cash-tab">Real $$</div>
+    </div>
+
+    <div class="pay-panel active" id="pay-bits">
+      <div class="bits-presets">
+        <div class="bits-preset" data-amount="1000">1K</div>
+        <div class="bits-preset" data-amount="5000">5K</div>
+        <div class="bits-preset" data-amount="10000">10K</div>
+        <div class="bits-preset" data-amount="25000">25K</div>
+        <div class="bits-preset" data-amount="0">Custom</div>
+      </div>
+      <input class="field-input" type="number" id="bitsAmount" placeholder="Amount in Bits" min="100">
+    </div>
+
+    <div class="pay-panel" id="pay-cash">
+      <div class="field-group">
+        <label class="field-label">USD Amount</label>
+        <input class="field-input" type="number" id="cashAmount" placeholder="e.g. 25.00" min="1" step="0.01">
+      </div>
+      <div style="font-family:'Share Tech Mono',monospace;font-size:9px;color:var(--text-dim);margin-bottom:10px;letter-spacing:1px;">
+        ⚠ Cash rewards paid out via StreamElements / PayPal after broadcaster confirms kill
+      </div>
+    </div>
+
+    <button class="post-btn" id="postBtn"><span>POST CONTRACT</span></button>
+  </div>
+</div>
+
+<!-- ═══ SUBMIT PANEL ═══ -->
+<div class="panel" id="panel-submit">
+  <div class="submit-wrap">
+    <div class="submit-title">Submit Kill Proof</div>
+
+    <div class="field-group">
+      <label class="field-label">Target You Eliminated</label>
+      <select class="field-select" id="claimTarget">
+        <option value="">No active contracts yet...</option>
+      </select>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label">Video Platform</label>
+      <div class="platform-tabs">
+        <div class="plat-tab active" data-plat="twitch">
+          <span class="plat-icon">🟣</span> Twitch
+        </div>
+        <div class="plat-tab" data-plat="youtube">
+          <span class="plat-icon">🔴</span> YouTube
+        </div>
+        <div class="plat-tab" data-plat="twitter">
+          <span class="plat-icon">🐦</span> X / Twitter
+        </div>
+        <div class="plat-tab" data-plat="other">
+          <span class="plat-icon">🔗</span> Other
+        </div>
+      </div>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label" id="urlLabel">Twitch Clip URL</label>
+      <input class="field-input" type="url" id="clipUrl" placeholder="https://clips.twitch.tv/...">
+      <div class="url-hint" id="urlHint">Clip must show the kill feed with target's username visible.</div>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label">Timestamp (optional)</label>
+      <input class="field-input" type="text" id="clipTimestamp" placeholder="e.g. 1:24 — where the kill happens">
+    </div>
+
+    <div class="field-group">
+      <label class="field-label">Notes (optional)</label>
+      <input class="field-input" type="text" id="clipNotes" placeholder="Any context about the kill...">
+    </div>
+
+    <button class="post-btn" id="submitBtn" style="margin-bottom:16px"><span>SUBMIT FOR REVIEW</span></button>
+
+    <div class="section-label">My Submissions</div>
+    <div id="mySubmissions">
+      <div class="empty-state" style="padding:20px 0">
+        <div class="empty-icon" style="font-size:18px">—</div>
+        <div class="empty-sub">No submissions yet</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ VOTE PANEL ═══ -->
+<div class="panel" id="panel-vote">
+  <div class="section-label">Clips Awaiting Verdict</div>
+
+  <div class="empty-state">
+    <div class="empty-icon">☠</div>
+    <div class="empty-text">No clips to review</div>
+    <div class="empty-sub">Submitted kills will appear here for voting</div>
+  </div>
+</div>
+
+<!-- ═══ LEADERBOARD PANEL ═══ -->
+<div class="panel" id="panel-leaderboard">
+  <div class="lb-header-row">
+    <div class="lb-title">Top Hunters</div>
+    <div class="lb-period">ALL TIME</div>
+  </div>
+
+  <div class="empty-state">
+    <div class="empty-icon">☠</div>
+    <div class="empty-text">No hunters yet</div>
+    <div class="empty-sub">Complete a contract to appear here</div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="viewer.js"></script>
+</body>
+</html>

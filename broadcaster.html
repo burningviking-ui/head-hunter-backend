@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HEAD-HUNTER — Broadcaster</title>
+<script src="https://extension-files.twitch.tv/helper/v1/twitch-ext.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Special+Elite&family=Oswald:wght@300;400;500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --blood: #8b1a1a;
+    --blood-bright: #c0392b;
+    --blood-dim: #4a0e0e;
+    --rust: #b5451b;
+    --paper: #141009;
+    --paper2: #1a140a;
+    --paper3: #211a0f;
+    --border: #3d2a14;
+    --text: #c8a96e;
+    --text-dim: #7a6040;
+    --text-bright: #e8d5a3;
+    --white: #f0e6cc;
+    --green: #2ecc71;
+    --bits: #9b59b6;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--paper);
+    color: var(--text);
+    font-family: 'Oswald', sans-serif;
+    padding: 20px;
+    min-height: 100vh;
+    background-image: radial-gradient(ellipse at 50% 0%, rgba(139,26,26,0.07) 0%, transparent 50%);
+  }
+
+  .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 20px;
+  }
+  .page-header-left .kicker {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--blood-bright);
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .page-header-left h1 {
+    font-family: 'Special Elite', cursive;
+    font-size: 26px;
+    color: var(--white);
+  }
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(139,26,26,0.2);
+    border: 1px solid var(--blood);
+    padding: 6px 14px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--white);
+    letter-spacing: 2px;
+  }
+  .live-dot { width: 6px; height: 6px; background: #ff4444; border-radius: 50%; animation: blink 1.2s ease infinite; }
+  @keyframes blink { 0%,100%{opacity:1}50%{opacity:0.2} }
+
+  /* STAT CARDS */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin-bottom: 22px;
+  }
+  .stat {
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    border-top: 2px solid var(--border);
+    padding: 12px 14px;
+    text-align: center;
+    transition: border-color 0.15s;
+  }
+  .stat.hot { border-top-color: var(--blood-bright); }
+  .stat-num {
+    font-family: 'Special Elite', cursive;
+    font-size: 28px;
+    color: var(--white);
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .stat-num.green { color: var(--green); }
+  .stat-num.red { color: var(--blood-bright); }
+  .stat-lbl {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  /* LAYOUT */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; position: relative; z-index: 1; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 20px; position: relative; z-index: 1; }
+
+  /* SECTIONS */
+  .section { margin-bottom: 20px; }
+  .section-hd {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--blood-bright);
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-hd::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  .panel-box {
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    padding: 16px;
+  }
+
+  /* FORM ELEMENTS */
+  label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--blood-bright);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    display: block;
+    margin-bottom: 4px;
+  }
+  input, select, textarea {
+    width: 100%;
+    background: var(--paper);
+    border: 1px solid var(--border);
+    color: var(--text-bright);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    padding: 8px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+    margin-bottom: 12px;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--blood); }
+  select option { background: var(--paper); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+
+  /* BUTTONS */
+  .btn {
+    font-family: 'Oswald', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    padding: 10px 18px;
+    cursor: pointer;
+    text-transform: uppercase;
+    border: 1px solid;
+    transition: all 0.15s;
+    background: transparent;
+  }
+  .btn-primary { border-color: var(--blood); color: var(--white); background: var(--blood); }
+  .btn-primary:hover { background: var(--blood-bright); border-color: var(--blood-bright); }
+  .btn-outline { border-color: var(--border); color: var(--text); }
+  .btn-outline:hover { border-color: var(--text); }
+  .btn-success { border-color: var(--green); color: var(--green); }
+  .btn-success:hover { background: rgba(46,204,113,0.1); }
+  .btn-danger { border-color: var(--blood-bright); color: var(--blood-bright); }
+  .btn-danger:hover { background: rgba(192,57,43,0.1); }
+  .btn-sm { padding: 6px 12px; font-size: 9px; }
+  .btn-block { width: 100%; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* CONTRACT LIST */
+  .contract-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    background: var(--paper);
+    margin-bottom: 6px;
+    transition: border-color 0.15s;
+  }
+  .contract-row:hover { border-color: var(--blood-dim); }
+  .cr-target {
+    font-family: 'Special Elite', cursive;
+    font-size: 15px;
+    color: var(--white);
+    flex: 1;
+  }
+  .cr-sub {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+  .cr-reward {
+    font-family: 'Oswald', sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    text-align: right;
+    min-width: 80px;
+  }
+  .cr-reward.cash { color: var(--green); }
+  .cr-reward.bits { color: #c39bd3; }
+  .cr-actions { display: flex; gap: 6px; }
+  .cr-timer {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    text-align: right;
+    min-width: 55px;
+  }
+
+  /* SUBMISSION REVIEW */
+  .review-card {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--rust);
+    background: var(--paper);
+    padding: 14px;
+    margin-bottom: 10px;
+  }
+  .review-card.new { border-left-color: var(--blood-bright); }
+  .review-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .review-target {
+    font-family: 'Special Elite', cursive;
+    font-size: 16px;
+    color: var(--white);
+    margin-bottom: 2px;
+  }
+  .review-by {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+  }
+  .review-reward {
+    text-align: right;
+    font-family: 'Oswald', sans-serif;
+    font-weight: 700;
+    font-size: 18px;
+    color: var(--green);
+  }
+  .review-reward-sub {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    text-align: right;
+  }
+  .clip-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+    word-break: break-all;
+  }
+  .clip-link a { color: var(--text); }
+  .vote-bar-container {
+    margin-bottom: 10px;
+  }
+  .vote-label-row {
+    display: flex;
+    justify-content: space-between;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+    letter-spacing: 1px;
+  }
+  .vote-bar-bg {
+    background: var(--paper);
+    border: 1px solid var(--border);
+    height: 6px;
+    overflow: hidden;
+  }
+  .vote-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--blood-dim), var(--blood-bright));
+    transition: width 0.4s ease;
+  }
+
+  /* TOGGLE SETTING */
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(61,42,20,0.5);
+  }
+  .setting-row:last-child { border-bottom: none; }
+  .setting-info {}
+  .setting-name { font-size: 14px; color: var(--text-bright); }
+  .setting-desc { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-dim); letter-spacing: 1px; margin-top: 2px; }
+  .toggle {
+    width: 38px; height: 20px;
+    background: var(--paper);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    position: relative;
+    flex-shrink: 0;
+    transition: all 0.2s;
+  }
+  .toggle.on { background: rgba(139,26,26,0.3); border-color: var(--blood); }
+  .toggle::after {
+    content: '';
+    width: 14px; height: 14px;
+    background: var(--text-dim);
+    border-radius: 50%;
+    position: absolute;
+    top: 2px; left: 2px;
+    transition: all 0.2s;
+  }
+  .toggle.on::after { left: 20px; background: var(--blood-bright); }
+
+  .notification {
+    position: fixed;
+    bottom: 16px; right: 16px;
+    background: var(--blood-dim);
+    border: 1px solid var(--blood);
+    border-left: 3px solid var(--blood-bright);
+    color: var(--white);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    padding: 10px 16px;
+    letter-spacing: 1px;
+    transform: translateY(60px);
+    transition: transform 0.25s ease;
+    z-index: 100;
+    max-width: 280px;
+  }
+  .notification.show { transform: translateY(0); }
+
+  .streamer-live { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #ff4444; letter-spacing: 1px; animation: blink 1.5s ease infinite; }
+  .streamer-offline { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-dim); letter-spacing: 1px; }
+  .twitch-link { color: #9b59b6; font-size: 9px; text-decoration: none; }
+  .twitch-link:hover { text-decoration: underline; }
+  .notify-sent { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #f39c12; letter-spacing: 1px; padding: 1px 6px; border: 1px solid rgba(243,156,18,0.4); }
+
+  /* LOOKUP */
+  .lookup-row { display: flex; gap: 8px; align-items: stretch; margin-bottom: 12px; }
+  .lookup-btn {
+    background: var(--blood-dim); border: 1px solid var(--blood); color: var(--white);
+    font-family: 'Oswald', sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 2px;
+    padding: 0 14px; cursor: pointer; white-space: nowrap; flex-shrink: 0; transition: background 0.15s;
+  }
+  .lookup-btn:hover { background: var(--blood); }
+  .streamer-profile {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--paper); border: 1px solid var(--blood-dim); border-left: 3px solid var(--blood-bright);
+    padding: 10px 12px; margin-bottom: 12px; animation: fadeIn 0.2s ease;
+  }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
+  .sp-avatar { font-size: 26px; flex-shrink: 0; }
+  .sp-name { font-family: 'Special Elite', cursive; font-size: 15px; color: var(--white); margin-bottom: 2px; }
+  .sp-status { font-family: 'Share Tech Mono', monospace; font-size: 9px; letter-spacing: 1px; margin-bottom: 2px; }
+  .sp-status.live { color: #ff4444; }
+  .sp-status.offline { color: var(--text-dim); }
+  .sp-link { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #9b59b6; }
+  .lookup-error {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px; color: var(--blood-bright);
+    letter-spacing: 1px; padding: 8px 10px; border: 1px solid var(--blood-dim);
+    background: rgba(139,26,26,0.1); margin-bottom: 12px;
+  }
+  .notify-auto-info {
+    font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #f39c12;
+    letter-spacing: 1px; padding: 7px 10px; border: 1px solid rgba(243,156,18,0.3);
+    background: rgba(243,156,18,0.05); margin-bottom: 12px;
+  }
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <div class="page-header-left">
+    <div class="kicker">☠ Broadcaster Control</div>
+    <h1>HEAD-HUNTER</h1>
+  </div>
+  <div class="status-pill"><div class="live-dot"></div>3 LIVE CONTRACTS</div>
+</div>
+
+<!-- STATS -->
+<div class="stats-row">
+  <div class="stat hot">
+    <div class="stat-num red">0</div>
+    <div class="stat-lbl">Active</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">0</div>
+    <div class="stat-lbl">Pending Review</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">0</div>
+    <div class="stat-lbl">Total Kills</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num green">$0</div>
+    <div class="stat-lbl">Cash Paid</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num" style="color:#c39bd3">0</div>
+    <div class="stat-lbl">Bits Paid</div>
+  </div>
+</div>
+
+<div class="grid-2">
+
+  <!-- POST CONTRACT -->
+  <div class="section">
+    <div class="section-hd">Post New Contract</div>
+    <div class="panel-box">
+
+      <label>Twitch Username of Target</label>
+      <div class="lookup-row">
+        <input type="text" id="bTarget" placeholder="e.g. xXSniperKingXx" style="margin-bottom:0;flex:1">
+        <button class="lookup-btn" id="bLookupBtn">LOOK UP</button>
+      </div>
+
+      <div class="streamer-profile" id="bStreamerProfile" style="display:none">
+        <div class="sp-avatar" id="bSpAvatar">🎮</div>
+        <div>
+          <div class="sp-name" id="bSpName">—</div>
+          <div class="sp-status" id="bSpStatus"></div>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
+            <div class="sp-link" id="bSpLink"></div>
+            <span id="bSpExtBadge" style="display:none;font-family:'Share Tech Mono',monospace;font-size:8px;color:var(--blood-bright);border:1px solid rgba(139,26,26,0.5);padding:1px 5px;letter-spacing:1px;">☠ HEAD-HUNTER</span>
+          </div>
+        </div>
+      </div>
+      <div class="lookup-error" id="bLookupError" style="display:none"></div>
+
+      <div class="notify-auto-info" id="bNotifyInfo" style="display:none">
+        🔔 Target will automatically be notified via chat message when this contract is posted.
+      </div>
+
+      <div class="row2">
+        <div>
+          <label>Game</label>
+          <input type="text" id="bGame" placeholder="e.g. Warzone, Apex, CS2..." list="bGamesList" autocomplete="off">
+          <datalist id="bGamesList">
+            <option value="Warzone"><option value="Apex Legends"><option value="Fortnite">
+            <option value="Valorant"><option value="CS2"><option value="PUBG">
+            <option value="Overwatch 2"><option value="Escape from Tarkov"><option value="Rust">
+            <option value="Rainbow Six Siege"><option value="Hunt: Showdown"><option value="DayZ">
+          </datalist>
+        </div>
+        <div>
+          <label>Platform</label>
+          <select>
+            <option>PC</option><option>PS5</option><option>Xbox</option><option>Cross-platform</option>
+          </select>
+        </div>
+      </div>
+      <div class="row2">
+        <div>
+          <label>Expires In</label>
+          <select>
+            <option>No expiry</option><option>1 hour</option><option>2 hours</option>
+            <option>4 hours</option><option>8 hours</option>
+          </select>
+        </div>
+        <div>
+          <label>Reward Type</label>
+          <select id="rewardType">
+            <option value="cash">💵 Cash</option>
+            <option value="bits">💜 Bits</option>
+            <option value="both">Both</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="reward-cash">
+        <label>USD Amount</label>
+        <input type="number" id="bCash" placeholder="25.00" min="1" step="0.01">
+      </div>
+      <div id="reward-bits" style="display:none">
+        <label>Bits Amount</label>
+        <input type="number" id="bBits" placeholder="10000" min="100">
+      </div>
+      <div id="reward-both" style="display:none">
+        <div class="row2">
+          <div><label>USD Amount</label><input type="number" placeholder="25.00"></div>
+          <div><label>Bits Amount</label><input type="number" placeholder="5000"></div>
+        </div>
+      </div>
+
+      <label>Hit Conditions</label>
+      <input type="text" id="bConditions" placeholder="Kill feed must be visible, any game mode...">
+
+      <div class="btn-row">
+        <button class="btn btn-primary btn-block" id="bPostBtn">☠ POST CONTRACT</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACTIVE CONTRACTS -->
+  <div class="section">
+    <div class="section-hd">Active Contracts</div>
+    <div style="text-align:center;padding:30px 20px;color:var(--text-dim);font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:2px;">
+      No active contracts. Post one above.
+    </div>
+  </div>
+</div>
+
+<!-- SUBMISSION REVIEW -->
+<div class="section" style="position:relative;z-index:10">
+  <div class="section-hd">Kill Submissions — Pending Review</div>
+  <div style="text-align:center;padding:30px 20px;color:var(--text-dim);font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:2px;">
+    No submissions pending review.
+  </div>
+</div>
+
+<!-- EXPIRED CONTRACTS — SURVIVAL PAYOUTS -->
+<div class="section">
+  <div class="section-hd">Expired Contracts — Survival Payouts</div>
+  <div style="text-align:center;padding:30px 20px;color:var(--text-dim);font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:2px;">
+    No expired contracts.
+  </div>
+</div>
+
+<!-- SETTINGS -->
+<div class="section">
+  <div class="section-hd">Settings</div>
+  <div class="panel-box">
+    <div class="row2">
+      <div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Community Voting</div>
+            <div class="setting-desc">Viewers vote on clip validity</div>
+          </div>
+          <div class="toggle on"></div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Viewers Can Place Bounties</div>
+            <div class="setting-desc">Allow viewer-funded contracts</div>
+          </div>
+          <div class="toggle on"></div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Bits Bounties</div>
+            <div class="setting-desc">Allow Bits as bounty currency</div>
+          </div>
+          <div class="toggle on"></div>
+        </div>
+      </div>
+      <div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Survival Payouts</div>
+            <div class="setting-desc">Target gets 50% of pot if timer expires</div>
+          </div>
+          <div class="toggle on"></div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Auto-Notify Targets</div>
+            <div class="setting-desc">Message streamers in chat when marked</div>
+          </div>
+          <div class="toggle on"></div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Cash Bounties</div>
+            <div class="setting-desc">Allow real money contracts</div>
+          </div>
+          <div class="toggle on"></div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Overlay Display</div>
+            <div class="setting-desc">Show contracts on stream</div>
+          </div>
+          <div class="toggle"></div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Subs-Only Placing</div>
+            <div class="setting-desc">Only subs can post contracts</div>
+          </div>
+          <div class="toggle"></div>
+        </div>
+      </div>
+    </div>
+    <div class="row3" style="margin-top:12px">
+      <div>
+        <label>Min Bits Bounty</label>
+        <input type="number" value="1000" placeholder="1000">
+      </div>
+      <div>
+        <label>Min Cash Bounty ($)</label>
+        <input type="number" value="5" placeholder="5.00">
+      </div>
+      <div>
+        <label>Vote Approve Threshold %</label>
+        <input type="number" value="70" placeholder="70">
+      </div>
+    </div>
+    <button class="btn btn-primary" id="saveSettingsBtn">Save Settings</button>
+  </div>
+</div>
+
+<div class="notification" id="notification"></div>
+
+<script src="broadcaster.js"></script>
+</body>
+</html>

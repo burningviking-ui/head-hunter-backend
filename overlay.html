@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HEAD-HUNTER — Overlay</title>
+<script src="https://extension-files.twitch.tv/helper/v1/twitch-ext.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Special+Elite&family=Oswald:wght@400;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: transparent;
+    font-family: 'Oswald', sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    padding: 18px;
+    pointer-events: none;
+  }
+
+  .widget {
+    width: 240px;
+    background: rgba(10, 7, 4, 0.90);
+    border: 1px solid rgba(139,26,26,0.7);
+    border-top: 2px solid #c0392b;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.8), 0 0 0 1px rgba(0,0,0,0.3);
+    animation: slideIn 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+  }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(-20px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .w-header {
+    padding: 7px 11px;
+    border-bottom: 1px solid rgba(139,26,26,0.4);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .w-title {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: #c0392b;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  .w-count {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: rgba(200,169,110,0.6);
+    letter-spacing: 1px;
+  }
+
+  .w-body { padding: 6px 0; }
+
+  .wanted-row {
+    padding: 7px 11px;
+    border-bottom: 1px solid rgba(61,42,20,0.4);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    animation: rowIn 0.35s ease forwards;
+    opacity: 0;
+  }
+  .wanted-row:nth-child(1) { animation-delay: 0.15s; }
+  .wanted-row:nth-child(2) { animation-delay: 0.3s; }
+  .wanted-row:nth-child(3) { animation-delay: 0.45s; }
+  .wanted-row:last-child { border-bottom: none; }
+  @keyframes rowIn {
+    from { opacity: 0; transform: translateX(-8px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .wr-left {}
+  .wr-name {
+    font-family: 'Special Elite', cursive;
+    font-size: 13px;
+    color: #f0e6cc;
+    margin-bottom: 1px;
+  }
+  .wr-live { font-size: 8px; animation: pulse 1.5s ease infinite; }
+  .wr-offline { font-size: 8px; opacity: 0.4; }
+  .wr-game {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    color: rgba(200,169,110,0.45);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .wr-right { text-align: right; flex-shrink: 0; }
+  .wr-reward {
+    font-family: 'Oswald', sans-serif;
+    font-weight: 700;
+    font-size: 12px;
+    color: #2ecc71;
+    white-space: nowrap;
+  }
+  .wr-reward.bits { color: #c39bd3; }
+  .wr-timer {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    color: rgba(200,169,110,0.4);
+    margin-top: 1px;
+  }
+
+  .w-footer {
+    padding: 5px 11px;
+    border-top: 1px solid rgba(139,26,26,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .w-footer-txt {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    color: rgba(200,169,110,0.35);
+    letter-spacing: 2px;
+  }
+  .pulse { width: 5px; height: 5px; background: #c0392b; border-radius: 50%; animation: pulse 1.5s ease infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.3;transform:scale(0.6)} }
+
+  /* Kill toast — pops in from bottom */
+  .kill-toast {
+    position: fixed;
+    bottom: 18px;
+    left: 18px;
+    width: 260px;
+    background: rgba(10,7,4,0.92);
+    border: 1px solid #2ecc71;
+    border-left: 3px solid #2ecc71;
+    padding: 10px 14px;
+    opacity: 0;
+    transform: translateY(14px);
+    transition: all 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    pointer-events: none;
+  }
+  .kill-toast.show { opacity: 1; transform: translateY(0); }
+  .kt-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    color: #2ecc71;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .kt-text {
+    font-family: 'Special Elite', cursive;
+    font-size: 13px;
+    color: #f0e6cc;
+    line-height: 1.4;
+  }
+  .kt-text strong { color: #fff; }
+  .kt-reward {
+    font-family: 'Oswald', sans-serif;
+    font-weight: 700;
+    font-size: 15px;
+    color: #2ecc71;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+
+<div class="widget">
+  <div class="w-header">
+    <div class="w-title">☠ HEAD-HUNTER</div>
+    <div class="w-count">3 ACTIVE</div>
+  </div>
+  <div class="w-body">
+    <div class="wanted-row">
+      <div class="wr-left">
+        <div class="wr-name">xXSniperKingXx <span class="wr-live">🔴</span></div>
+        <div class="wr-game">Warzone · PC</div>
+      </div>
+      <div class="wr-right">
+        <div class="wr-reward">$25 + 10K</div>
+        <div class="wr-timer">⏱ 1h 22m</div>
+      </div>
+    </div>
+    <div class="wanted-row">
+      <div class="wr-left">
+        <div class="wr-name">no_scope_god <span class="wr-live">🔴</span></div>
+        <div class="wr-game">Apex · PS5</div>
+      </div>
+      <div class="wr-right">
+        <div class="wr-reward">$50</div>
+        <div class="wr-timer">⏱ 3h 05m</div>
+      </div>
+    </div>
+    <div class="wanted-row">
+      <div class="wr-left">
+        <div class="wr-name">TTV_FragMachine <span class="wr-offline">⚫</span></div>
+        <div class="wr-game">Fortnite · Xbox</div>
+      </div>
+      <div class="wr-right">
+        <div class="wr-reward bits">5K Bits</div>
+        <div class="wr-timer">No expiry</div>
+      </div>
+    </div>
+  </div>
+  <div class="w-footer">
+    <div class="w-footer-txt">HEAD-HUNTER · Open to hunt</div>
+    <div class="pulse"></div>
+  </div>
+</div>
+
+<div class="kill-toast" id="killToast">
+  <div class="kt-label">☠ HEAD-HUNTER — CONTRACT COMPLETE</div>
+  <div class="kt-text"><strong id="kHunter">DeadEyeDan</strong> eliminated <strong id="kTarget">xXSniperKingXx</strong></div>
+  <div class="kt-reward" id="kReward">$25 + 10,000 Bits</div>
+</div>
+
+<div class="kill-toast" id="survivalToast" style="border-color:#2ecc71;">
+  <div class="kt-label" style="color:#2ecc71;">🛡 HEAD-HUNTER — SURVIVED</div>
+  <div class="kt-text">No one could take down <strong id="sTarget">GhostSniper</strong> in time</div>
+  <div class="kt-reward" style="color:#2ecc71;" id="sReward">$10 + 2,500 Bits paid to target</div>
+</div>
+
+<script src="overlay.js"></script>
+</body>
+</html>
