@@ -28,9 +28,13 @@ var appToken       = null;
 var appTokenExpiry = 0;
 
 // Bot user token — needs scope: user:write:chat
-var botToken        = process.env.BOT_ACCESS_TOKEN  || null;
-var botRefreshToken = process.env.BOT_REFRESH_TOKEN || null;
-var botUserId       = process.env.BOT_USER_ID        || null;
+var botToken           = process.env.BOT_ACCESS_TOKEN    || null;
+var botRefreshToken    = process.env.BOT_REFRESH_TOKEN   || null;
+var botUserId          = process.env.BOT_USER_ID          || null;
+
+// The broadcaster's channel where the bot posts — must be set in Render env vars
+// Get your numeric Twitch user ID at: https://www.streamweasels.com/tools/convert-twitch-username-to-user-id/
+var broadcasterUserId  = process.env.BROADCASTER_USER_ID || null;
 
 // ─── GET APP ACCESS TOKEN ─────────────────────────────────
 async function getAppToken() {
@@ -91,10 +95,11 @@ async function getUserId(username) {
 // broadcaster_id = channel owner's numeric ID
 // sender_id      = bot's numeric ID
 async function sendChatMessage(broadcasterUserId, message, token) {
+  const cleanToken = (token || '').replace(/^oauth:/i, '');
   return fetch('https://api.twitch.tv/helix/chat/messages', {
     method: 'POST',
     headers: {
-      'Authorization': 'Bearer ' + token,
+      'Authorization': 'Bearer ' + cleanToken,
       'Client-Id':     process.env.TWITCH_CLIENT_ID,
       'Content-Type':  'application/json'
     },
@@ -201,12 +206,14 @@ app.get('/api/lookup', async (req, res) => {
 // Posts a bounty and sends a chat message in the target's channel
 // Body: { target, game, platform, reward, expiry, conditions }
 app.post('/api/contract', async (req, res) => {
-  const { target, game, platform, reward, expiry, conditions } = req.body || {};
+  const { target, game, platform, reward, expiry, conditions, broadcaster_id } = req.body || {};
   if (!target || !game || !reward) {
     return res.status(400).json({ error: 'target, game, and reward are required' });
   }
 
-  // Build the chat message — keep it punchy for chat
+  // Post to broadcaster's own channel (where bot is modded), not the target's channel
+  const channelId = broadcaster_id || broadcasterUserId;
+
   const chatMsg = '☠ HEAD-HUNTER BOUNTY ALERT ☠ '
     + 'A bounty of ' + reward + ' has been placed on @' + target + '! '
     + 'Game: ' + game
@@ -219,30 +226,26 @@ app.post('/api/contract', async (req, res) => {
   try {
     if (!botToken || !botUserId) {
       chatResult = 'bot_not_configured';
+      console.warn('[contract] Bot not configured — set BOT_ACCESS_TOKEN and BOT_USER_ID');
+    } else if (!channelId) {
+      chatResult = 'no_channel';
+      console.warn('[contract] No broadcaster channel — set BROADCASTER_USER_ID env var');
     } else {
-      // Resolve target's user ID (needed as broadcaster_id for their channel)
-      const targetUser = await getUserId(target);
-      if (!targetUser) {
-        chatResult = 'user_not_found';
+      let chatRes = await sendChatMessage(channelId, chatMsg, botToken);
+
+      if (chatRes.status === 401) {
+        console.log('[chat] 401 — refreshing bot token...');
+        const newToken = await refreshBotToken();
+        chatRes = await sendChatMessage(channelId, chatMsg, newToken);
+      }
+
+      if (chatRes.status === 200 || chatRes.status === 204) {
+        chatResult = 'sent';
+        console.log('[chat] Bounty alert sent to broadcaster channel for target: ' + target);
       } else {
-        // Send chat message to target's channel
-        let chatRes = await sendChatMessage(targetUser.id, chatMsg, botToken);
-
-        // Auto-refresh token if expired
-        if (chatRes.status === 401) {
-          console.log('[chat] 401 — refreshing bot token...');
-          const newToken = await refreshBotToken();
-          chatRes = await sendChatMessage(targetUser.id, chatMsg, newToken);
-        }
-
-        if (chatRes.status === 200 || chatRes.status === 204) {
-          chatResult = 'sent';
-          console.log('[chat] Message sent to ' + target + '\'s channel');
-        } else {
-          const errBody = await chatRes.text();
-          console.error('[chat] Failed:', chatRes.status, errBody);
-          chatResult = 'failed';
-        }
+        const errBody = await chatRes.text();
+        console.error('[chat] Failed status=' + chatRes.status + ' body=' + errBody);
+        chatResult = 'failed';
       }
     }
   } catch (err) {
@@ -363,14 +366,17 @@ app.post('/api/subscribe-channel-points', async (req, res) => {
 // ─── POST /api/payout ─────────────────────────────────
 // Sends a chat message when bounty is paid out
 app.post('/api/payout', async (req, res) => {
-  const { target, reward, hunter, count, broadcaster } = req.body || {};
+  const { target, reward, hunter, count, broadcaster, seAwarded } = req.body || {};
   if (!target || !reward) return res.status(400).json({ error: 'target and reward required' });
 
   const bountyWord  = count && count > 1 ? count + ' bounties' : 'bounty';
   const hunterLabel = hunter && hunter !== 'A hunter' ? '@' + hunter : 'a hunter';
+  const seNote      = seAwarded && seAwarded > 0
+    ? ' ⚡ ' + Number(seAwarded).toLocaleString() + ' SE Points auto-awarded to hunter!'
+    : '';
   const chatMsg = '☠ HEAD-HUNTER — BOUNTY COMPLETED! '
     + 'The ' + bountyWord + ' on @' + target + ' has been claimed by ' + hunterLabel + '! '
-    + 'Prize: ' + reward + ' — To the victor goes the spoils - BOUNTY COMPLETED!';
+    + 'Prize: ' + reward + seNote + ' — To the victor goes the spoils!';
 
   var chatResult = 'not_sent';
 
@@ -380,14 +386,18 @@ app.post('/api/payout', async (req, res) => {
     if (!botToken || !botUserId) {
       chatResult = 'bot_not_configured';
     } else {
-      // Always notify the target's channel
-      const targetUser = await getUserId(target);
-      if (targetUser) channelsToNotify.push({ id: targetUser.id, name: target });
-
-      // Also notify the broadcaster's channel if provided and different
-      if (broadcaster && broadcaster.toLowerCase() !== target.toLowerCase()) {
+      // Post to broadcaster's channel (where bot is modded)
+      // Use BROADCASTER_USER_ID env var, or broadcaster login passed in body
+      if (broadcasterUserId) {
+        channelsToNotify.push({ id: broadcasterUserId, name: broadcaster || 'broadcaster' });
+      } else if (broadcaster) {
         const bcUser = await getUserId(broadcaster);
         if (bcUser) channelsToNotify.push({ id: bcUser.id, name: broadcaster });
+      }
+      // If neither available, fall back to target's channel (may fail without mod)
+      if (channelsToNotify.length === 0) {
+        const targetUser = await getUserId(target);
+        if (targetUser) channelsToNotify.push({ id: targetUser.id, name: target });
       }
 
       if (channelsToNotify.length === 0) {
@@ -421,12 +431,88 @@ app.post('/api/payout', async (req, res) => {
   res.json({ success: true, target, chat: chatResult });
 });
 
+// ─── STREAMELEMENTS HELPERS ──────────────────────────────
+const SE_API       = 'https://api.streamelements.com/kappa/v2';
+const SE_CHANNEL   = process.env.SE_CHANNEL_ID  || '';
+const SE_JWT       = process.env.SE_JWT_TOKEN    || '';
+
+async function seRequest(method, path, body) {
+  const opts = {
+    method,
+    headers: {
+      'Authorization': 'Bearer ' + SE_JWT,
+      'Content-Type':  'application/json',
+      'Accept':        'application/json'
+    }
+  };
+  if (body) opts.body = JSON.stringify(body);
+  return fetch(SE_API + path, opts);
+}
+
+// ─── GET /api/se/balance?username=xyz ─────────────────
+app.get('/api/se/balance', async (req, res) => {
+  const { username } = req.query;
+  if (!username) return res.status(400).json({ error: 'username required' });
+  if (!SE_JWT || !SE_CHANNEL) return res.status(503).json({ error: 'SE not configured' });
+  try {
+    const r    = await seRequest('GET', '/points/' + SE_CHANNEL + '/' + encodeURIComponent(username));
+    const data = await r.json();
+    if (data.points !== undefined) {
+      console.log('[se/balance]', username, '→', data.points);
+      res.json({ username, points: data.points });
+    } else {
+      console.warn('[se/balance] unexpected response:', data);
+      res.status(404).json({ error: 'User not found in SE', detail: data });
+    }
+  } catch (err) {
+    console.error('[se/balance] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/se/deduct ──────────────────────────────
+// Deducts points from a viewer (bounty placer)
+app.post('/api/se/deduct', async (req, res) => {
+  const { username, points, reason } = req.body || {};
+  if (!username || !points) return res.status(400).json({ error: 'username and points required' });
+  if (!SE_JWT || !SE_CHANNEL) return res.status(503).json({ error: 'SE not configured' });
+  try {
+    const r    = await seRequest('DELETE', '/points/' + SE_CHANNEL + '/' + encodeURIComponent(username) + '/' + Math.abs(parseInt(points)));
+    const data = await r.json();
+    console.log('[se/deduct]', username, '-', points, 'pts | reason:', reason, '| result:', data.newAmount);
+    res.json({ success: true, username, deducted: points, newAmount: data.newAmount });
+  } catch (err) {
+    console.error('[se/deduct] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── POST /api/se/award ───────────────────────────────
+// Awards points to a viewer (hunter payout or refund)
+app.post('/api/se/award', async (req, res) => {
+  const { username, points, reason } = req.body || {};
+  if (!username || !points) return res.status(400).json({ error: 'username and points required' });
+  if (!SE_JWT || !SE_CHANNEL) return res.status(503).json({ error: 'SE not configured' });
+  try {
+    const r    = await seRequest('PUT', '/points/' + SE_CHANNEL + '/' + encodeURIComponent(username) + '/' + Math.abs(parseInt(points)));
+    const data = await r.json();
+    console.log('[se/award]', username, '+', points, 'pts | reason:', reason, '| result:', data.newAmount);
+    res.json({ success: true, username, awarded: points, newAmount: data.newAmount });
+  } catch (err) {
+    console.error('[se/award] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ─── START ────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log('HEAD-HUNTER EBS running on port ' + PORT);
   console.log('Client ID:',      process.env.TWITCH_CLIENT_ID     ? '✓ set' : '✗ MISSING');
   console.log('Client Secret:',  process.env.TWITCH_CLIENT_SECRET ? '✓ set' : '✗ MISSING');
-  console.log('Bot User ID:',    botUserId  ? '✓ set' : '✗ not set (chat disabled)');
-  console.log('Bot Token:',      botToken   ? '✓ set' : '✗ not set (chat disabled)');
+  console.log('Bot User ID:',       botUserId       ? '✓ set' : '✗ not set (chat disabled)');
+  console.log('Bot Token:',         botToken        ? '✓ set' : '✗ not set (chat disabled)');
+  console.log('Broadcaster ID:',    broadcasterUserId ? '✓ set (' + broadcasterUserId + ')' : '✗ MISSING — set BROADCASTER_USER_ID');
+  console.log('SE Channel ID:',  SE_CHANNEL ? '✓ set' : '✗ not set (SE disabled)');
+  console.log('SE JWT:',         SE_JWT     ? '✓ set' : '✗ not set (SE disabled)');
 });
 
