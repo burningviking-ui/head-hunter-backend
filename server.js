@@ -825,6 +825,25 @@ app.post('/api/network/submission/:id/reject', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+
+// ── POST /api/network/leaderboard/clear ───────────────────
+// Resets all claimed data so leaderboard starts fresh
+// Protected by ADMIN_SECRET env var
+app.post('/api/network/leaderboard/clear', async (req, res) => {
+  const secret = process.env.ADMIN_SECRET || 'headhunter-admin';
+  if (req.body.secret !== secret) return res.status(403).json({ error: 'Forbidden' });
+  if (!dbReady) return res.status(503).json({ error: 'Network not available' });
+  try {
+    // Reset claimed fields on all contracts — leaderboard pulls from claimed_by
+    await pool.query('UPDATE network_contracts SET claimed=false, claimed_by=NULL, claimed_at=NULL');
+    // Delete all submissions so vote history is clean too
+    await pool.query('DELETE FROM network_submissions');
+    await pool.query('DELETE FROM network_votes');
+    console.log('[admin] Leaderboard and submissions cleared');
+    res.json({ success: true, message: 'Leaderboard cleared — fresh start!' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── GET /api/network/leaderboard ──────────────────────────
 app.get('/api/network/leaderboard', async (req, res) => {
   if (!dbReady) return res.json({ leaderboard: [] });
