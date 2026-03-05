@@ -97,6 +97,12 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_nc_active  ON network_contracts(claimed, expires_at);
       CREATE INDEX IF NOT EXISTS idx_ns_status  ON network_submissions(status);
     `);
+    // Run migrations — safely add columns that may not exist on older deployments
+    await client.query(`
+      ALTER TABLE network_submissions ADD COLUMN IF NOT EXISTS submitted_by_login TEXT;
+      ALTER TABLE network_contracts   ADD COLUMN IF NOT EXISTS bits_amount INTEGER DEFAULT 0;
+    `).catch(function(){});
+
     dbReady = true;
     console.log('[db] Network tables ready — cross-channel sync active');
   } finally {
