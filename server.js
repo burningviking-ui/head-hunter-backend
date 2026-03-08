@@ -671,13 +671,20 @@ app.get('/api/leaderboard/global', verifyExtensionJwt, async function(req, res) 
        LIMIT 20`
     );
     var rows = r.rows;
-    var ids  = rows.map(function(row) { return row.user_id; }).filter(Boolean);
+    var ids  = rows.map(function(row) { return row.user_id; }).filter(function(id) {
+      // Only numeric IDs work with Helix — skip opaque IDs (start with U or A)
+      return id && /^\d+$/.test(id);
+    });
+    console.log('[leaderboard] user_ids from DB:', rows.map(function(r){return r.user_id;}));
+    console.log('[leaderboard] numeric IDs to look up:', ids);
     var nameMap = {};
     try {
       if (ids.length > 0) {
+        var token = await getAppToken();
         var url = 'https://api.twitch.tv/helix/users?' + ids.map(function(id) { return 'id=' + id; }).join('&');
-        var resp = await fetch(url, { headers: { 'Client-ID': process.env.TWITCH_CLIENT_ID, 'Authorization': 'Bearer ' + await getAppToken() } });
+        var resp = await fetch(url, { headers: { 'Client-Id': process.env.TWITCH_CLIENT_ID, 'Authorization': 'Bearer ' + token } });
         var data = await resp.json();
+        console.log('[leaderboard] Helix response:', JSON.stringify(data).slice(0, 200));
         (data.data || []).forEach(function(u) { nameMap[u.id] = { display_name: u.display_name, login: u.login, avatar: u.profile_image_url }; });
       }
     } catch(e) { console.error('[leaderboard] Name lookup failed:', e.message); }
