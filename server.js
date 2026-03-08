@@ -696,14 +696,15 @@ app.get('/api/leaderboard/global', verifyExtensionJwt, async function(req, res) 
   }
 });
 
-// ── ADMIN RESET (one-time use, remove after) ─────────────
-app.post('/api/admin/reset', verifyExtensionJwt, requireBroadcaster, async function(req, res) {
+// ── ADMIN RESET ──────────────────────────────────────────
+app.post('/api/admin/reset', async function(req, res) {
+  if (req.headers['x-admin-key'] !== 'hh-reset-2026') return res.status(403).json({ error: 'Forbidden' });
   try {
     await pool.query('DELETE FROM votes');
     await pool.query('DELETE FROM submissions');
     await pool.query('DELETE FROM contracts');
     console.log('[admin] All data wiped');
-    res.json({ success: true, message: 'All contracts, submissions and votes cleared' });
+    res.json({ success: true, message: 'All data cleared' });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
