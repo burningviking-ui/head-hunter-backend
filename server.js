@@ -633,7 +633,7 @@ app.get('/api/leaderboard', verifyExtensionJwt, async function(req, res) {
       if (ids.length > 0) {
         var url = 'https://api.twitch.tv/helix/users?' + ids.map(function(id) { return 'id=' + id; }).join('&');
         var resp = await fetch(url, {
-          headers: { 'Client-ID': clientId, 'Authorization': 'Bearer ' + await getAppToken() }
+          headers: { 'Client-ID': process.env.TWITCH_CLIENT_ID, 'Authorization': 'Bearer ' + await getAppToken() }
         });
         var data = await resp.json();
         (data.data || []).forEach(function(u) { nameMap[u.id] = { display_name: u.display_name, login: u.login, avatar: u.profile_image_url }; });
@@ -676,7 +676,7 @@ app.get('/api/leaderboard/global', verifyExtensionJwt, async function(req, res) 
     try {
       if (ids.length > 0) {
         var url = 'https://api.twitch.tv/helix/users?' + ids.map(function(id) { return 'id=' + id; }).join('&');
-        var resp = await fetch(url, { headers: { 'Client-ID': clientId, 'Authorization': 'Bearer ' + await getAppToken() } });
+        var resp = await fetch(url, { headers: { 'Client-ID': process.env.TWITCH_CLIENT_ID, 'Authorization': 'Bearer ' + await getAppToken() } });
         var data = await resp.json();
         (data.data || []).forEach(function(u) { nameMap[u.id] = { display_name: u.display_name, login: u.login, avatar: u.profile_image_url }; });
       }
