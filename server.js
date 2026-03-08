@@ -1,134 +1,151 @@
 // ═══════════════════════════════════════════════════════════
-//  HEAD-HUNTER — Extension Backend Service (EBS)
-//  Handles: live status lookup, chat notifications
-//  Deploy to Railway: railway up
+//  HEAD-HUNTER EBS v2.0
+//  Security-hardened Extension Backend Service
+//  Deploy to Render — attach a free PostgreSQL database
 // ═══════════════════════════════════════════════════════════
 
 require('dotenv').config();
-const express  = require('express');
-const cors     = require('cors');
-const fetch    = require('node-fetch');
-const { Pool } = require('pg');
+const express    = require('express');
+const cors       = require('cors');
+const fetch      = require('node-fetch');
+const jwt        = require('jsonwebtoken');
+const rateLimit  = require('express-rate-limit');
+const { Pool }   = require('pg');
+
+// ── STARTUP GUARD ────────────────────────────────────────
+if (!process.env.EXTENSION_SECRET) {
+  console.error('[FATAL] EXTENSION_SECRET is not set. Exiting.');
+  process.exit(1);
+}
+if (!process.env.TWITCH_CLIENT_ID || !process.env.TWITCH_CLIENT_SECRET) {
+  console.error('[FATAL] TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET not set. Exiting.');
+  process.exit(1);
+}
 
 const app  = express();
+app.set('trust proxy', 1); // Required for Render's proxy
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({
-  verify: function(req, res, buf) { req.rawBody = buf.toString(); }
-}));
-app.use(cors({
-  origin: [
-    /\.twitch\.tv$/,
-    /\.ext-twitch\.tv$/,
-    'http://localhost:8080'
-  ]
-}));
+const EXTENSION_SECRET   = Buffer.from(process.env.EXTENSION_SECRET, 'base64');
+const broadcasterUserId  = process.env.BROADCASTER_USER_ID || null;
+var   botToken           = process.env.BOT_ACCESS_TOKEN    || null;
+var   botRefreshToken    = process.env.BOT_REFRESH_TOKEN   || null;
+const botUserId          = process.env.BOT_USER_ID         || null;
 
+// ── MIDDLEWARE ───────────────────────────────────────────
+app.use(express.json());
+var corsOptions = {
+  origin: function(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (/\.twitch\.tv$/.test(origin) || /\.ext-twitch\.tv$/.test(origin) || /^https?:\/\/localhost/.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('CORS: origin not allowed: ' + origin));
+  },
+  credentials: true,
+  methods: ['GET','POST','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // handle preflight for all routes
 
-// ─── POSTGRES (shared bounty network) ─────────────────────
-// Attach a free PostgreSQL database in Render → DATABASE_URL is set automatically
-// If DATABASE_URL is not set, extension runs in local mode (no cross-channel sync)
-const pool = process.env.DATABASE_URL ? new Pool({
+// Rate limiting — 30/min general, 10/min writes
+const generalLimiter = rateLimit({ windowMs: 60000, max: 30,  standardHeaders: true, legacyHeaders: false });
+const writeLimiter   = rateLimit({ windowMs: 60000, max: 10,  standardHeaders: true, legacyHeaders: false });
+app.use(generalLimiter);
+
+// ── POSTGRES ─────────────────────────────────────────────
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-}) : null;
-
-var dbReady = false;
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
 
 async function initDb() {
-  if (!pool) {
-    console.log('[db] No DATABASE_URL — local mode only, no cross-channel sync');
-    return;
-  }
   const client = await pool.connect();
   try {
     await client.query(`
-      CREATE TABLE IF NOT EXISTS network_channels (
-        channel_id    TEXT PRIMARY KEY,
-        channel_login TEXT NOT NULL,
-        display_name  TEXT,
-        opted_in      BOOLEAN DEFAULT true,
-        opted_in_at   TIMESTAMPTZ DEFAULT NOW(),
-        last_seen     TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE TABLE IF NOT EXISTS network_contracts (
+      CREATE TABLE IF NOT EXISTS contracts (
         id            TEXT PRIMARY KEY,
         channel_id    TEXT NOT NULL,
-        channel_login TEXT NOT NULL,
         target        TEXT NOT NULL,
         game          TEXT NOT NULL,
         platform      TEXT DEFAULT 'PC',
         reward        TEXT NOT NULL,
         bits_amount   INTEGER DEFAULT 0,
-        conditions    TEXT,
-        expiry_label  TEXT,
+        conditions    TEXT DEFAULT '',
+        expiry_label  TEXT DEFAULT '2 hours',
         expires_at    TIMESTAMPTZ,
         posted_at     TIMESTAMPTZ DEFAULT NOW(),
         posted_by     TEXT,
-        claimed       BOOLEAN DEFAULT false,
-        claimed_by    TEXT,
-        claimed_at    TIMESTAMPTZ
+        status        TEXT DEFAULT 'active',
+        avatar        TEXT DEFAULT ''
       );
-      CREATE TABLE IF NOT EXISTS network_submissions (
+      CREATE TABLE IF NOT EXISTS submissions (
         id             TEXT PRIMARY KEY,
-        contract_id    TEXT NOT NULL,
+        contract_id    TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
         channel_id     TEXT NOT NULL,
-        target         TEXT NOT NULL,
-        game           TEXT NOT NULL,
-        total_reward   TEXT NOT NULL,
         clip_url       TEXT NOT NULL,
-        platform       TEXT DEFAULT 'TWITCH',
-        submitted_by       TEXT,
-        submitted_by_login TEXT,
+        notes          TEXT DEFAULT '',
+        submitted_by   TEXT NOT NULL,
         submitted_at   TIMESTAMPTZ DEFAULT NOW(),
         status         TEXT DEFAULT 'review',
         approves       INTEGER DEFAULT 0,
         rejects        INTEGER DEFAULT 0,
         vote_closes_at TIMESTAMPTZ,
-        claimed_at     TIMESTAMPTZ
+        transaction_id TEXT UNIQUE
       );
-      CREATE TABLE IF NOT EXISTS network_votes (
+      CREATE TABLE IF NOT EXISTS votes (
         submission_id TEXT NOT NULL,
         voter_id      TEXT NOT NULL,
         vote          TEXT NOT NULL,
         voted_at      TIMESTAMPTZ DEFAULT NOW(),
         PRIMARY KEY (submission_id, voter_id)
       );
-      CREATE INDEX IF NOT EXISTS idx_nc_active  ON network_contracts(claimed, expires_at);
-      CREATE INDEX IF NOT EXISTS idx_ns_status  ON network_submissions(status);
+      CREATE INDEX IF NOT EXISTS idx_contracts_channel ON contracts(channel_id);
+      CREATE INDEX IF NOT EXISTS idx_contracts_status  ON contracts(status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_submissions_contract ON submissions(contract_id);
+      CREATE INDEX IF NOT EXISTS idx_submissions_status   ON submissions(status);
     `);
-    // Run migrations — safely add columns that may not exist on older deployments
-    await client.query(`
-      ALTER TABLE network_submissions ADD COLUMN IF NOT EXISTS submitted_by_login TEXT;
-      ALTER TABLE network_contracts   ADD COLUMN IF NOT EXISTS bits_amount INTEGER DEFAULT 0;
-    `).catch(function(){});
-
-    dbReady = true;
-    console.log('[db] Network tables ready — cross-channel sync active');
+    // Migrations — safe to run on every startup
+    await pool.query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS avatar TEXT DEFAULT ''");
+    console.log('[db] Tables ready');
   } finally {
     client.release();
   }
 }
 
-function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+// ── JWT MIDDLEWARE ───────────────────────────────────────
+function verifyExtensionJwt(req, res, next) {
+  var auth = req.headers['authorization'] || '';
+  var token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Missing JWT' });
+  try {
+    var payload = jwt.verify(token, EXTENSION_SECRET, { algorithms: ['HS256'] });
+    req.jwtPayload = payload;
+    // channel_id always comes from JWT — never trust req.body for this
+    req.channelId = String(payload.channel_id || '');
+    req.userId    = String(payload.user_id    || '');
+    req.role      = payload.role || 'viewer';
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid JWT: ' + e.message });
+  }
+}
 
-// ─── TOKEN CACHE ──────────────────────────────────────────
+function requireBroadcaster(req, res, next) {
+  if (req.role !== 'broadcaster') {
+    return res.status(403).json({ error: 'Broadcaster only' });
+  }
+  next();
+}
+
+// ── TOKEN CACHE ──────────────────────────────────────────
 var appToken       = null;
 var appTokenExpiry = 0;
 
-// Bot user token — needs scope: user:write:chat
-var botToken           = process.env.BOT_ACCESS_TOKEN    || null;
-var botRefreshToken    = process.env.BOT_REFRESH_TOKEN   || null;
-var botUserId          = process.env.BOT_USER_ID          || null;
-
-// The broadcaster's channel where the bot posts — must be set in Render env vars
-// Get your numeric Twitch user ID at: https://www.streamweasels.com/tools/convert-twitch-username-to-user-id/
-var broadcasterUserId  = process.env.BROADCASTER_USER_ID || null;
-
-// ─── GET APP ACCESS TOKEN ─────────────────────────────────
 async function getAppToken() {
   if (appToken && Date.now() < appTokenExpiry) return appToken;
-  const res  = await fetch('https://id.twitch.tv/oauth2/token', {
+  var res  = await fetch('https://id.twitch.tv/oauth2/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -137,18 +154,16 @@ async function getAppToken() {
       grant_type:    'client_credentials'
     })
   });
-  const data = await res.json();
-  if (!data.access_token) throw new Error('Failed to get app token: ' + JSON.stringify(data));
+  var data = await res.json();
+  if (!data.access_token) throw new Error('App token failed: ' + JSON.stringify(data));
   appToken       = data.access_token;
   appTokenExpiry = Date.now() + (data.expires_in - 300) * 1000;
-  console.log('[token] App access token refreshed');
   return appToken;
 }
 
-// ─── REFRESH BOT TOKEN ────────────────────────────────────
 async function refreshBotToken() {
-  if (!botRefreshToken) throw new Error('No bot refresh token configured');
-  const res  = await fetch('https://id.twitch.tv/oauth2/token', {
+  if (!botRefreshToken) throw new Error('No bot refresh token');
+  var res  = await fetch('https://id.twitch.tv/oauth2/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -158,289 +173,82 @@ async function refreshBotToken() {
       refresh_token: botRefreshToken
     })
   });
-  const data = await res.json();
-  if (!data.access_token) throw new Error('Failed to refresh bot token: ' + JSON.stringify(data));
+  var data = await res.json();
+  if (!data.access_token) throw new Error('Bot token refresh failed');
   botToken        = data.access_token;
-  botRefreshToken = data.refresh_token;
-  console.log('[token] Bot user token refreshed');
+  botRefreshToken = data.refresh_token || botRefreshToken;
+  console.log('[bot] Token refreshed');
   return botToken;
 }
 
-// ─── GET USER ID BY USERNAME ──────────────────────────────
-async function getUserId(username) {
-  const token = await getAppToken();
-  const res   = await fetch('https://api.twitch.tv/helix/users?login=' + encodeURIComponent(username), {
-    headers: {
-      'Authorization': 'Bearer ' + token,
-      'Client-Id':     process.env.TWITCH_CLIENT_ID
-    }
+// ── TWITCH LOOKUP ────────────────────────────────────────
+async function getUserByLogin(login) {
+  var token = await getAppToken();
+  var res   = await fetch('https://api.twitch.tv/helix/users?login=' + encodeURIComponent(login), {
+    headers: { 'Authorization': 'Bearer ' + token, 'Client-Id': process.env.TWITCH_CLIENT_ID }
   });
-  const data = await res.json();
-  return data.data && data.data[0] ? { id: data.data[0].id, login: data.data[0].login } : null;
+  var data = await res.json();
+  return (data.data && data.data[0]) || null;
 }
 
-// ─── SEND CHAT MESSAGE ────────────────────────────────────
-// Sends a message to a channel's chat using Twitch Helix chat API
-// broadcaster_id = channel owner's numeric ID
-// sender_id      = bot's numeric ID
-async function sendChatMessage(broadcasterUserId, message, token) {
-  const cleanToken = (token || '').replace(/^oauth:/i, '');
+async function getUserById(id) {
+  var token = await getAppToken();
+  var res   = await fetch('https://api.twitch.tv/helix/users?id=' + encodeURIComponent(id), {
+    headers: { 'Authorization': 'Bearer ' + token, 'Client-Id': process.env.TWITCH_CLIENT_ID }
+  });
+  var data = await res.json();
+  return (data.data && data.data[0]) || null;
+}
+
+async function isStreamLive(userId) {
+  var token = await getAppToken();
+  var res   = await fetch('https://api.twitch.tv/helix/streams?user_id=' + encodeURIComponent(userId), {
+    headers: { 'Authorization': 'Bearer ' + token, 'Client-Id': process.env.TWITCH_CLIENT_ID }
+  });
+  var data = await res.json();
+  return !!(data.data && data.data[0]);
+}
+
+// ── CHAT NOTIFICATION ────────────────────────────────────
+async function sendChatMessage(channelId, message, token) {
+  if (!botUserId || !token) return { status: 0 };
   return fetch('https://api.twitch.tv/helix/chat/messages', {
     method: 'POST',
     headers: {
-      'Authorization': 'Bearer ' + cleanToken,
+      'Authorization': 'Bearer ' + token,
       'Client-Id':     process.env.TWITCH_CLIENT_ID,
       'Content-Type':  'application/json'
     },
     body: JSON.stringify({
-      broadcaster_id: broadcasterUserId,
+      broadcaster_id: channelId,
       sender_id:      botUserId,
       message:        message
     })
   });
 }
 
-// ─── CHANNEL POINTS REDEMPTION STORE ─────────────────────
-// In-memory store: { channelId: [ redemption, ... ] }
-// Free Render tier has no persistent disk, so this resets on redeploy
-// Redemptions are consumed by the extension polling /api/redemptions
-var pendingRedemptions = {};
-
-// ─── EVENTSUB WEBHOOK SECRET ──────────────────────────────
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'headhunter-secret';
-
-// Verify Twitch EventSub signature
-function verifyTwitchSignature(req) {
-  const msgId        = req.headers['twitch-eventsub-message-id']        || '';
-  const msgTimestamp = req.headers['twitch-eventsub-message-timestamp']  || '';
-  const msgSignature = req.headers['twitch-eventsub-message-signature']  || '';
-  const body         = req.rawBody || '';
-  const hmacMsg      = msgId + msgTimestamp + body;
-  const crypto       = require('crypto');
-  const expected     = 'sha256=' + crypto.createHmac('sha256', WEBHOOK_SECRET).update(hmacMsg).digest('hex');
-  return expected === msgSignature;
+async function trySendChat(channelId, message) {
+  if (!botUserId || !botToken) return 'no-bot';
+  try {
+    var res = await sendChatMessage(channelId, message, botToken);
+    if (res.status === 401) {
+      var newToken = await refreshBotToken();
+      res = await sendChatMessage(channelId, message, newToken);
+    }
+    return (res.status === 200 || res.status === 204) ? 'sent' : 'failed-' + res.status;
+  } catch (e) {
+    return 'error';
+  }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  ROUTES
-// ═══════════════════════════════════════════════════════════
-
-// Health check
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'HEAD-HUNTER EBS' });
-});
-
-// Extension ID for HEAD-HUNTER
-const EXTENSION_ID = 'syw6rysu5tf8znr3f97k16pcv9u9wg';
-
-// ─── GET /api/lookup?username=xyz ─────────────────────────
-app.get('/api/lookup', async (req, res) => {
-  const username = (req.query.username || '').trim().toLowerCase();
-  const userId   = (req.query.id || '').trim();
-
-  if (!username && !userId) return res.status(400).json({ error: 'username or id required' });
-
-  // Quick ID-only lookup — just returns login name, no stream data needed
-  if (userId && !username) {
-    try {
-      const token = await getAppToken();
-      const r = await fetch('https://api.twitch.tv/helix/users?id=' + encodeURIComponent(userId), {
-        headers: { 'Authorization': 'Bearer ' + token, 'Client-Id': process.env.TWITCH_CLIENT_ID }
-      });
-      const d = await r.json();
-      if (d.data && d.data[0]) {
-        return res.json({ found: true, id: d.data[0].id, login: d.data[0].login, display_name: d.data[0].display_name });
-      }
-      return res.status(404).json({ found: false, error: 'User not found' });
-    } catch(err) {
-      return res.status(500).json({ error: err.message });
-    }
-  }
-
+// ── PUBSUB BROADCAST ─────────────────────────────────────
+async function pubsubBroadcast(channelId, payload) {
   try {
-    const token = await getAppToken();
-    const [userRes, streamRes] = await Promise.all([
-      fetch('https://api.twitch.tv/helix/users?login=' + encodeURIComponent(username), {
-        headers: { 'Authorization': 'Bearer ' + token, 'Client-Id': process.env.TWITCH_CLIENT_ID }
-      }),
-      fetch('https://api.twitch.tv/helix/streams?user_login=' + encodeURIComponent(username), {
-        headers: { 'Authorization': 'Bearer ' + token, 'Client-Id': process.env.TWITCH_CLIENT_ID }
-      })
-    ]);
-
-    const userData   = await userRes.json();
-    const streamData = await streamRes.json();
-    const user       = userData.data   && userData.data[0];
-    const stream     = streamData.data && streamData.data[0];
-
-    if (!user) return res.status(404).json({ found: false, error: 'User not found' });
-
-    // Check if target has HEAD-HUNTER extension installed
-    let hasExtension = false;
-    try {
-      const extRes  = await fetch('https://api.twitch.tv/helix/users/extensions?user_id=' + user.id, {
-        headers: { 'Authorization': 'Bearer ' + token, 'Client-Id': process.env.TWITCH_CLIENT_ID }
-      });
-      const extData = await extRes.json();
-      if (extData.data) {
-        const allExts = Object.values(extData.data).reduce(function(all, slot) {
-          return all.concat(Object.values(slot));
-        }, []);
-        hasExtension = allExts.some(function(ext) { return ext.id === EXTENSION_ID && ext.active; });
-      }
-    } catch (extErr) {
-      console.warn('[lookup] Extension check failed (non-fatal):', extErr.message);
-    }
-
-    res.json({
-      found:         true,
-      id:            user.id,
-      login:         user.login,
-      display_name:  user.display_name,
-      profile_image: user.profile_image_url,
-      is_live:       !!stream,
-      viewer_count:  stream ? stream.viewer_count : 0,
-      game:          stream ? stream.game_name    : null,
-      title:         stream ? stream.title        : null,
-      has_extension: hasExtension
-    });
-  } catch (err) {
-    console.error('[lookup] Error:', err.message);
-    res.status(500).json({ error: 'Lookup failed', detail: err.message });
-  }
-});
-
-// ─── POST /api/contract ───────────────────────────────────
-// Posts a bounty and sends a chat message in the target's channel
-// Body: { target, game, platform, reward, expiry, conditions }
-app.post('/api/contract', async (req, res) => {
-  const { target, game, platform, reward, expiry, conditions, broadcaster_id } = req.body || {};
-  if (!target || !game || !reward) {
-    return res.status(400).json({ error: 'target, game, and reward are required' });
-  }
-
-  // Post to broadcaster's own channel (where bot is modded), not the target's channel
-  const channelId = broadcaster_id || broadcasterUserId;
-
-  const chatMsg = '☠ HEAD-HUNTER BOUNTY ALERT ☠ '
-    + 'A bounty of ' + reward + ' has been placed on @' + target + '! '
-    + 'Game: ' + game
-    + (expiry && expiry !== 'No expiry' ? ' · Expires: ' + expiry : '')
-    + (conditions ? ' · Conditions: ' + conditions : '')
-    + ' — Hunters, open the HEAD-HUNTER panel to claim the contract!';
-
-  var chatResult = 'not_sent';
-
-  try {
-    if (!botToken || !botUserId) {
-      chatResult = 'bot_not_configured';
-      console.warn('[contract] Bot not configured — set BOT_ACCESS_TOKEN and BOT_USER_ID');
-    } else if (!channelId) {
-      chatResult = 'no_channel';
-      console.warn('[contract] No broadcaster channel — set BROADCASTER_USER_ID env var');
-    } else {
-      let chatRes = await sendChatMessage(channelId, chatMsg, botToken);
-
-      if (chatRes.status === 401) {
-        console.log('[chat] 401 — refreshing bot token...');
-        const newToken = await refreshBotToken();
-        chatRes = await sendChatMessage(channelId, chatMsg, newToken);
-      }
-
-      if (chatRes.status === 200 || chatRes.status === 204) {
-        chatResult = 'sent';
-        console.log('[chat] Bounty alert sent to broadcaster channel for target: ' + target);
-      } else {
-        const errBody = await chatRes.text();
-        console.error('[chat] Failed status=' + chatRes.status + ' body=' + errBody);
-        chatResult = 'failed';
-      }
-    }
-  } catch (err) {
-    console.error('[contract] Chat error (non-fatal):', err.message);
-    chatResult = 'error';
-  }
-
-  res.json({ success: true, target, chat: chatResult });
-});
-
-// ─── POST /api/eventsub ───────────────────────────────────
-// Receives Twitch EventSub channel point redemption webhooks
-app.post('/api/eventsub', (req, res) => {
-  const msgType = req.headers['twitch-eventsub-message-type'];
-
-  // Verify signature
-  if (!verifyTwitchSignature(req)) {
-    console.warn('[eventsub] Invalid signature — rejected');
-    return res.status(403).send('Forbidden');
-  }
-
-  // Respond to challenge (subscription verification)
-  if (msgType === 'webhook_callback_verification') {
-    console.log('[eventsub] Subscription verified');
-    return res.status(200).send(req.body.challenge);
-  }
-
-  // Revocation
-  if (msgType === 'revocation') {
-    console.log('[eventsub] Subscription revoked');
-    return res.sendStatus(204);
-  }
-
-  // Handle notification
-  if (msgType === 'notification') {
-    const event = req.body.event;
-    if (event && event.reward) {
-      const channelId = event.broadcaster_user_id;
-      const userName  = event.user_name || event.user_login;
-      const rewardTitle = event.reward.title || '';
-
-      // Only process HEAD-HUNTER rewards
-      if (rewardTitle.toLowerCase().indexOf('head-hunter') !== -1 ||
-          rewardTitle.toLowerCase().indexOf('headhunter')  !== -1 ||
-          rewardTitle.toLowerCase().indexOf('bounty')      !== -1) {
-
-        if (!pendingRedemptions[channelId]) pendingRedemptions[channelId] = [];
-        pendingRedemptions[channelId].push({
-          id:          event.id,
-          redeemedBy:  userName,
-          rewardTitle: rewardTitle,
-          rewardCost:  event.reward.cost,
-          userInput:   event.user_input || '',
-          redeemedAt:  Date.now()
-        });
-        console.log('[eventsub] Channel points redemption stored for channel', channelId, 'by', userName);
-      }
-    }
-    return res.sendStatus(204);
-  }
-
-  res.sendStatus(204);
-});
-
-// ─── GET /api/redemptions?channel_id=xyz ─────────────────
-// Extension polls this to check for pending channel point bounties
-app.get('/api/redemptions', (req, res) => {
-  const channelId = req.query.channel_id;
-  if (!channelId) return res.status(400).json({ error: 'channel_id required' });
-
-  const items = pendingRedemptions[channelId] || [];
-  // Return and clear pending redemptions for this channel
-  pendingRedemptions[channelId] = [];
-  res.json({ redemptions: items });
-});
-
-// ─── POST /api/subscribe-channel-points ──────────────────
-// Broadcaster calls this once to register EventSub subscription
-app.post('/api/subscribe-channel-points', async (req, res) => {
-  const { broadcaster_id } = req.body || {};
-  if (!broadcaster_id) return res.status(400).json({ error: 'broadcaster_id required' });
-
-  const callbackUrl = (process.env.RENDER_EXTERNAL_URL || 'https://head-hunter-backend.onrender.com') + '/api/eventsub';
-
-  try {
-    const token = await getAppToken();
-    const subRes = await fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
+    var token = jwt.sign(
+      { exp: Math.floor(Date.now() / 1000) + 60, channel_id: channelId, role: 'external' },
+      EXTENSION_SECRET
+    );
+    await fetch('https://api.twitch.tv/helix/extensions/pubsub', {
       method: 'POST',
       headers: {
         'Authorization': 'Bearer ' + token,
@@ -448,449 +256,482 @@ app.post('/api/subscribe-channel-points', async (req, res) => {
         'Content-Type':  'application/json'
       },
       body: JSON.stringify({
-        type:      'channel.channel_points_custom_reward_redemption.add',
-        version:   '1',
-        condition: { broadcaster_user_id: broadcaster_id },
-        transport: {
-          method:   'webhook',
-          callback: callbackUrl,
-          secret:   WEBHOOK_SECRET
-        }
+        target:     ['broadcast'],
+        broadcaster_id: channelId,
+        is_global_broadcast: false,
+        message:    JSON.stringify(payload)
       })
     });
-    const data = await subRes.json();
-    if (data.error) {
-      console.error('[subscribe] Failed:', data);
-      return res.status(400).json({ error: data.message || 'Subscription failed', detail: data });
-    }
-    console.log('[subscribe] EventSub subscription created for', broadcaster_id);
-    res.json({ success: true, subscription: data.data && data.data[0] });
-  } catch (err) {
-    console.error('[subscribe] Error:', err.message);
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    console.error('[pubsub] Error:', e.message);
   }
-});
-
-// ─── POST /api/payout ─────────────────────────────────
-// Sends a chat message when bounty is paid out
-app.post('/api/payout', async (req, res) => {
-  const { target, reward, hunter, count, broadcaster, seAwarded } = req.body || {};
-  if (!target || !reward) return res.status(400).json({ error: 'target and reward required' });
-
-  const bountyWord  = count && count > 1 ? count + ' bounties' : 'bounty';
-  const hunterLabel = hunter && hunter !== 'A hunter' ? '@' + hunter : 'a hunter';
-  const seNote      = seAwarded && seAwarded > 0
-    ? ' ⚡ ' + Number(seAwarded).toLocaleString() + ' SE Points auto-awarded to hunter!'
-    : '';
-  const chatMsg = '☠ HEAD-HUNTER — BOUNTY COMPLETED! '
-    + 'The ' + bountyWord + ' on @' + target + ' has been claimed by ' + hunterLabel + '! '
-    + 'Prize: ' + reward + seNote + ' — To the victor goes the spoils!';
-
-  var chatResult = 'not_sent';
-
-  // Send to broadcaster's channel (where the extension lives) AND target's channel
-  const channelsToNotify = [];
-  try {
-    if (!botToken || !botUserId) {
-      chatResult = 'bot_not_configured';
-    } else {
-      // Post to broadcaster's channel (where bot is modded)
-      // Use BROADCASTER_USER_ID env var, or broadcaster login passed in body
-      if (broadcasterUserId) {
-        channelsToNotify.push({ id: broadcasterUserId, name: broadcaster || 'broadcaster' });
-      } else if (broadcaster) {
-        const bcUser = await getUserId(broadcaster);
-        if (bcUser) channelsToNotify.push({ id: bcUser.id, name: broadcaster });
-      }
-      // If neither available, fall back to target's channel (may fail without mod)
-      if (channelsToNotify.length === 0) {
-        const targetUser = await getUserId(target);
-        if (targetUser) channelsToNotify.push({ id: targetUser.id, name: target });
-      }
-
-      if (channelsToNotify.length === 0) {
-        chatResult = 'user_not_found';
-      } else {
-        var anyFailed = false;
-        for (var i = 0; i < channelsToNotify.length; i++) {
-          var ch = channelsToNotify[i];
-          let chatRes = await sendChatMessage(ch.id, chatMsg, botToken);
-          if (chatRes.status === 401) {
-            console.log('[payout] 401 — refreshing bot token...');
-            const newToken = await refreshBotToken();
-            chatRes = await sendChatMessage(ch.id, chatMsg, newToken);
-          }
-          if (chatRes.status === 200 || chatRes.status === 204) {
-            console.log('[payout] Chat sent to ' + ch.name + ': sent');
-          } else {
-            const errBody = await chatRes.text();
-            console.error('[payout] Chat FAILED to ' + ch.name + ' — status:', chatRes.status, '— body:', errBody);
-            anyFailed = true;
-          }
-        }
-        chatResult = anyFailed ? 'partial' : 'sent';
-      }
-    }
-  } catch (err) {
-    console.error('[payout] Error:', err.message);
-    chatResult = 'error';
-  }
-
-  res.json({ success: true, target, chat: chatResult });
-});
-
-// ─── STREAMELEMENTS HELPERS ──────────────────────────────
-const SE_API       = 'https://api.streamelements.com/kappa/v2';
-const SE_CHANNEL   = process.env.SE_CHANNEL_ID  || '';
-const SE_JWT       = process.env.SE_JWT_TOKEN    || '';
-
-async function seRequest(method, path, body) {
-  const opts = {
-    method,
-    headers: {
-      'Authorization': 'Bearer ' + SE_JWT,
-      'Content-Type':  'application/json',
-      'Accept':        'application/json'
-    }
-  };
-  if (body) opts.body = JSON.stringify(body);
-  return fetch(SE_API + path, opts);
 }
 
-// ─── GET /api/se/balance?username=xyz ─────────────────
-app.get('/api/se/balance', async (req, res) => {
-  const { username } = req.query;
-  if (!username) return res.status(400).json({ error: 'username required' });
-  if (!SE_JWT || !SE_CHANNEL) return res.status(503).json({ error: 'SE not configured' });
-  try {
-    const r    = await seRequest('GET', '/points/' + SE_CHANNEL + '/' + encodeURIComponent(username));
-    const data = await r.json();
-    if (data.points !== undefined) {
-      console.log('[se/balance]', username, '→', data.points);
-      res.json({ username, points: data.points });
-    } else {
-      console.warn('[se/balance] unexpected response:', data);
-      res.status(404).json({ error: 'User not found in SE', detail: data });
-    }
-  } catch (err) {
-    console.error('[se/balance] Error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── POST /api/se/deduct ──────────────────────────────
-// Deducts points from a viewer (bounty placer)
-app.post('/api/se/deduct', async (req, res) => {
-  const { username, points, reason } = req.body || {};
-  if (!username || !points) return res.status(400).json({ error: 'username and points required' });
-  if (!SE_JWT || !SE_CHANNEL) return res.status(503).json({ error: 'SE not configured' });
-  try {
-    const r    = await seRequest('DELETE', '/points/' + SE_CHANNEL + '/' + encodeURIComponent(username) + '/' + Math.abs(parseInt(points)));
-    const data = await r.json();
-    console.log('[se/deduct]', username, '-', points, 'pts | reason:', reason, '| result:', data.newAmount);
-    res.json({ success: true, username, deducted: points, newAmount: data.newAmount });
-  } catch (err) {
-    console.error('[se/deduct] Error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ─── POST /api/se/award ───────────────────────────────
-// Awards points to a viewer (hunter payout or refund)
-app.post('/api/se/award', async (req, res) => {
-  const { username, points, reason } = req.body || {};
-  if (!username || !points) return res.status(400).json({ error: 'username and points required' });
-  if (!SE_JWT || !SE_CHANNEL) return res.status(503).json({ error: 'SE not configured' });
-  try {
-    const r    = await seRequest('PUT', '/points/' + SE_CHANNEL + '/' + encodeURIComponent(username) + '/' + Math.abs(parseInt(points)));
-    const data = await r.json();
-    console.log('[se/award]', username, '+', points, 'pts | reason:', reason, '| result:', data.newAmount);
-    res.json({ success: true, username, awarded: points, newAmount: data.newAmount });
-  } catch (err) {
-    console.error('[se/award] Error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-
-// ═══════════════════════════════════════════════════════════
-//  NETWORK ROUTES — Cross-channel shared bounty board
-//  All routes require DATABASE_URL to be set in Render env
-// ═══════════════════════════════════════════════════════════
-
-// ── GET /api/network/status ───────────────────────────────
-app.get('/api/network/status', (req, res) => {
-  res.json({ enabled: dbReady, service: 'HEAD-HUNTER NETWORK' });
-});
-
-// ── POST /api/network/optin ────────────────────────────────
-app.post('/api/network/optin', async (req, res) => {
-  if (!dbReady) return res.status(503).json({ error: 'Network not available — DATABASE_URL not set' });
-  const { channel_id, channel_login, display_name, opted_in } = req.body || {};
-  if (!channel_id || !channel_login) return res.status(400).json({ error: 'channel_id and channel_login required' });
-  try {
-    await pool.query(`
-      INSERT INTO network_channels (channel_id, channel_login, display_name, opted_in, last_seen)
-      VALUES ($1,$2,$3,$4,NOW())
-      ON CONFLICT (channel_id) DO UPDATE SET opted_in=$4, channel_login=$2, display_name=$3, last_seen=NOW()
-    `, [channel_id, channel_login, display_name || channel_login, opted_in !== false]);
-    console.log('[network] ' + channel_login + (opted_in !== false ? ' joined' : ' left') + ' the network');
-    res.json({ success: true, opted_in: opted_in !== false });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── GET /api/network/channels ─────────────────────────────
-app.get('/api/network/channels', async (req, res) => {
-  if (!dbReady) return res.json({ channels: [] });
-  try {
-    const r = await pool.query(
-      'SELECT channel_id, channel_login, display_name, opted_in_at FROM network_channels WHERE opted_in=true ORDER BY opted_in_at ASC'
-    );
-    res.json({ channels: r.rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── GET /api/network/contracts ────────────────────────────
-app.get('/api/network/contracts', async (req, res) => {
-  if (!dbReady) return res.json({ contracts: [], ts: new Date().toISOString() });
-  const { channel_id, since } = req.query;
-  try {
-    let q = `
-      SELECT c.*, ch.display_name as channel_display
-      FROM network_contracts c
-      LEFT JOIN network_channels ch ON ch.channel_id = c.channel_id
-      WHERE c.claimed=false AND (c.expires_at IS NULL OR c.expires_at > NOW())
-    `;
-    const params = [];
-    if (channel_id) { params.push(channel_id); q += ' AND c.channel_id=$' + params.length; }
-    if (since)      { params.push(since);       q += ' AND c.posted_at>$'  + params.length; }
-    q += ' ORDER BY c.posted_at DESC LIMIT 100';
-    const r = await pool.query(q, params);
-    res.json({ contracts: r.rows, ts: new Date().toISOString() });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── POST /api/network/contract ────────────────────────────
-app.post('/api/network/contract', async (req, res) => {
-  if (!dbReady) return res.status(503).json({ error: 'Network not available' });
-  const { channel_id, channel_login, target, game, platform, reward, bits_amount,
-          conditions, expiry_label, expires_at, posted_by, broadcaster_id } = req.body || {};
-  if (!channel_id || !target || !game || !reward)
-    return res.status(400).json({ error: 'channel_id, target, game, reward required' });
-
-  // Auto-register channel as opted in
-  await pool.query(`
-    INSERT INTO network_channels (channel_id, channel_login, display_name, opted_in, last_seen)
-    VALUES ($1,$2,$2,true,NOW())
-    ON CONFLICT (channel_id) DO UPDATE SET last_seen=NOW(), opted_in=true
-  `, [channel_id, channel_login || channel_id]).catch(() => {});
-
-  const id = uid();
-  try {
-    await pool.query(`
-      INSERT INTO network_contracts
-        (id,channel_id,channel_login,target,game,platform,reward,bits_amount,conditions,expiry_label,expires_at,posted_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-    `, [id, channel_id, channel_login || channel_id, target, game,
-        platform || 'PC', reward, bits_amount || 0,
-        conditions || '', expiry_label || 'No expiry', expires_at || null, posted_by || null]);
-
-    // Build and send chat message
-    const chatMsg = '☠ HEAD-HUNTER BOUNTY ALERT ☠ '
-      + 'A bounty of ' + reward + ' has been placed on @' + target + '! Game: ' + game
-      + (expiry_label && expiry_label !== 'No expiry' ? ' · Expires: ' + expiry_label : '')
-      + (conditions ? ' · Conditions: ' + conditions : '')
-      + ' — Hunters, open the HEAD-HUNTER panel to claim!';
-
-    const chatChannelId = broadcaster_id || broadcasterUserId || channel_id;
-    var chatResult = 'not_sent';
+// ── EXPIRY CRON ──────────────────────────────────────────
+function startCrons() {
+  // Every 5 min: mark expired contracts
+  setInterval(async function() {
     try {
-      let chatRes2 = await sendChatMessage(chatChannelId, chatMsg, botToken);
-      if (chatRes2.status === 401) {
-        const newTok = await refreshBotToken();
-        chatRes2 = await sendChatMessage(chatChannelId, chatMsg, newTok);
+      var r = await pool.query(
+        "UPDATE contracts SET status='expired' WHERE status='active' AND expires_at IS NOT NULL AND expires_at < NOW()"
+      );
+      if (r.rowCount > 0) console.log('[cron] Expired ' + r.rowCount + ' contracts');
+    } catch (e) { console.error('[cron] Expiry error:', e.message); }
+  }, 5 * 60 * 1000);
+
+  // Every 2h: reset stale 'hunting' claims (hunter went offline without submitting)
+  setInterval(async function() {
+    try {
+      var r = await pool.query(
+        "UPDATE contracts SET status='active' WHERE status='hunting' AND posted_at < NOW() - INTERVAL '2 hours'"
+      );
+      if (r.rowCount > 0) console.log('[cron] Reset ' + r.rowCount + ' stale hunts');
+    } catch (e) { console.error('[cron] Stale hunt reset error:', e.message); }
+  }, 2 * 60 * 60 * 1000);
+
+  // Every 5 min: close expired vote windows
+  setInterval(async function() {
+    try {
+      // Find expired submissions still in review
+      var expired = await pool.query(
+        "SELECT id, approves, rejects FROM submissions WHERE status='review' AND vote_closes_at IS NOT NULL AND vote_closes_at < NOW()"
+      );
+      for (var row of expired.rows) {
+        var total    = (row.approves||0) + (row.rejects||0);
+        var legitPct = total > 0 ? (row.approves||0) / total : 0;
+        // If 60%+ legit — auto-approve, otherwise fail
+        var newStatus = (legitPct >= 0.6) ? 'approved' : 'failed';
+        await pool.query('UPDATE submissions SET status=$1 WHERE id=$2', [newStatus, row.id]);
       }
-      chatResult = (chatRes2.status === 200 || chatRes2.status === 204) ? 'sent' : 'failed';
-    } catch(e) { chatResult = 'error'; }
+      if (expired.rowCount > 0) console.log('[cron] Closed ' + expired.rowCount + ' vote windows');
+    } catch (e) { console.error('[cron] Vote close error:', e.message); }
+  }, 5 * 60 * 1000);
+}
 
-    console.log('[network/contract] ' + target + ' | ' + reward + ' | chat: ' + chatResult);
-    res.json({ success: true, id, chat: chatResult });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+// ── HELPERS ──────────────────────────────────────────────
+function uid() { return crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2); }
+
+function parseExpiry(label) {
+  if (!label || label === 'No expiry') return null;
+  var m = String(label).match(/^(\d+)\s*(min|hour|h|m)/i);
+  if (!m) return null;
+  var n   = parseInt(m[1]);
+  var unit = m[2].toLowerCase();
+  var ms = (unit === 'min' || unit === 'm') ? n * 60000 : n * 3600000;
+  return new Date(Date.now() + ms);
+}
+
+// ═════════════════════════════════════════════════════════
+//  ROUTES
+// ═════════════════════════════════════════════════════════
+
+// ── HEALTH ───────────────────────────────────────────────
+app.get('/health', function(req, res) {
+  res.json({ ok: true, version: '2.0.0' });
 });
 
-// ── POST /api/network/contract/:id/claim ──────────────────
-app.post('/api/network/contract/:id/claim', async (req, res) => {
-  if (!dbReady) return res.status(503).json({ error: 'Network not available' });
-  const { claimed_by, broadcaster_id } = req.body || {};
+// ── USER LOOKUP ──────────────────────────────────────────
+app.get('/api/lookup', async function(req, res) {
   try {
-    const r = await pool.query(
-      'UPDATE network_contracts SET claimed=true,claimed_by=$1,claimed_at=NOW() WHERE id=$2 AND claimed=false RETURNING *',
-      [claimed_by || 'unknown', req.params.id]
+    var user = null;
+    if (req.query.login) user = await getUserByLogin(req.query.login);
+    else if (req.query.id) user = await getUserById(req.query.id);
+    if (!user) return res.json({ found: false });
+    var live = await isStreamLive(user.id);
+    res.json({
+      found:        true,
+      id:           user.id,
+      login:        user.login,
+      display_name: user.display_name,
+      avatar:       user.profile_image_url,
+      live:         live
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET CONTRACTS ─────────────────────────────────────────
+app.get('/api/contracts', verifyExtensionJwt, async function(req, res) {
+  try {
+    var channelId = req.channelId;
+    var r = await pool.query(
+      "SELECT * FROM contracts WHERE channel_id=$1 AND status IN ('active','hunting') ORDER BY posted_at DESC LIMIT 20",
+      [channelId]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'Not found or already claimed' });
-    const contract = r.rows[0];
-    const chatChannelId = broadcaster_id || broadcasterUserId || contract.channel_id;
-    const msg = '☠ HEAD-HUNTER — BOUNTY COMPLETED! The bounty on @' + contract.target
-      + ' has been claimed by @' + (claimed_by || 'a hunter') + '! Prize: ' + contract.reward + ' — To the victor goes the spoils!';
-    try {
-      let cr = await sendChatMessage(chatChannelId, msg, botToken);
-      if (cr.status === 401) { const nt = await refreshBotToken(); await sendChatMessage(chatChannelId, msg, nt); }
-    } catch(e) {}
-    res.json({ success: true, contract });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json({ contracts: r.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// ── DELETE /api/network/contract/:id ──────────────────────
-app.delete('/api/network/contract/:id', async (req, res) => {
-  if (!dbReady) return res.status(503).json({ error: 'Network not available' });
+// ── GET GLOBAL CONTRACTS (all channels) ──────────────────
+app.get('/api/contracts/global', verifyExtensionJwt, async function(req, res) {
   try {
-    await pool.query('DELETE FROM network_contracts WHERE id=$1', [req.params.id]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    var r = await pool.query(
+      "SELECT * FROM contracts WHERE status IN ('active','hunting') ORDER BY posted_at DESC LIMIT 50"
+    );
+    res.json({ contracts: r.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// ── GET /api/network/submissions ──────────────────────────
-app.get('/api/network/submissions', async (req, res) => {
-  if (!dbReady) return res.json({ submissions: [], ts: new Date().toISOString() });
-  const { channel_id } = req.query;
-  try {
-    const params = channel_id ? [channel_id] : [];
-    const where  = channel_id ? "status='review' AND channel_id=$1" : "status='review'";
-    const r = await pool.query('SELECT * FROM network_submissions WHERE ' + where + ' ORDER BY submitted_at DESC', params);
-    res.json({ submissions: r.rows, ts: new Date().toISOString() });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// ── POST CONTRACT ─────────────────────────────────────────
+app.post('/api/contracts', writeLimiter, verifyExtensionJwt, async function(req, res) {
+  var channelId = req.channelId; // always from JWT
+  var b         = req.body;
+  if (!b.target || !b.game) return res.status(400).json({ error: 'target and game required' });
 
-// ── POST /api/network/submission ──────────────────────────
-app.post('/api/network/submission', async (req, res) => {
-  if (!dbReady) return res.status(503).json({ error: 'Network not available' });
-  const { contract_id, channel_id, target, game, total_reward, clip_url, platform, submitted_by } = req.body || {};
-  if (!contract_id || !clip_url || !target) return res.status(400).json({ error: 'contract_id, clip_url, target required' });
-  const id = uid();
-  const voteClosesAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
   try {
-    await pool.query(`
-      INSERT INTO network_submissions (id,contract_id,channel_id,target,game,total_reward,clip_url,platform,submitted_by,submitted_by_login,vote_closes_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-    `, [id, contract_id, channel_id || '', target, game || '', total_reward || '', clip_url, platform || 'TWITCH', submitted_by || null, req.body.submitted_by_login || null, voteClosesAt]);
-    res.json({ success: true, id, vote_closes_at: voteClosesAt });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── POST /api/network/vote ─────────────────────────────────
-app.post('/api/network/vote', async (req, res) => {
-  if (!dbReady) return res.status(503).json({ error: 'Network not available' });
-  const { submission_id, voter_id, vote } = req.body || {};
-  if (!submission_id || !voter_id || !['approve','reject'].includes(vote))
-    return res.status(400).json({ error: 'submission_id, voter_id, vote required' });
-  try {
+    var id        = uid();
+    var expiresAt = parseExpiry(b.expiry_label);
+    // Look up target avatar
+    var avatarUrl = '';
+    try { var tu = await getUserByLogin(b.target); if (tu) avatarUrl = tu.profile_image_url || ''; } catch(e) {}
     await pool.query(
-      'INSERT INTO network_votes(submission_id,voter_id,vote) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',
-      [submission_id, voter_id, vote]
+      `INSERT INTO contracts (id,channel_id,target,game,platform,reward,bits_amount,conditions,expiry_label,expires_at,posted_by,avatar)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [id, channelId, b.target, b.game, b.platform||'PC', b.reward||'Bits',
+       parseInt(b.bits_amount)||0, b.conditions||'', b.expiry_label||'2 hours',
+       expiresAt, req.userId, avatarUrl]
     );
-    const counts = await pool.query(
-      "SELECT COUNT(*) FILTER(WHERE vote='approve') AS approves, COUNT(*) FILTER(WHERE vote='reject') AS rejects FROM network_votes WHERE submission_id=$1",
-      [submission_id]
+
+    var contract = (await pool.query('SELECT * FROM contracts WHERE id=$1', [id])).rows[0];
+
+    // Notify broadcaster's channel chat
+    var chatStatus = await trySendChat(
+      broadcasterUserId || channelId,
+      '☠ HEAD-HUNTER BOUNTY ALERT ☠ A bounty of ' + (b.bits_amount||'?') + ' Bits has been placed on @' + b.target + '! Game: ' + b.game + ' · Hunters, open HEAD-HUNTER to claim the contract!'
     );
-    const { approves, rejects } = counts.rows[0];
-    await pool.query('UPDATE network_submissions SET approves=$1,rejects=$2 WHERE id=$3',
-      [parseInt(approves), parseInt(rejects), submission_id]);
-    res.json({ success: true, approves: parseInt(approves), rejects: parseInt(rejects) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+
+    // PubSub broadcast to all viewers
+    await pubsubBroadcast(channelId, { type: 'contract_posted', contract: contract });
+
+    res.json({ success: true, contract: contract, chatStatus: chatStatus });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// ── POST /api/network/submission/:id/approve ──────────────
-app.post('/api/network/submission/:id/approve', async (req, res) => {
-  if (!dbReady) return res.status(503).json({ error: 'Network not available' });
-  const { broadcaster_id, hunter_name } = req.body || {};
+// ── DELETE CONTRACT (broadcaster only) ───────────────────
+// ── CLAIM CONTRACT ────────────────────────────────────────
+app.post('/api/contracts/:id/claim', writeLimiter, verifyExtensionJwt, async function(req, res) {
+  var channelId = req.channelId;
   try {
-    const r = await pool.query(
-      "UPDATE network_submissions SET status='claimed',claimed_at=NOW() WHERE id=$1 AND status='review' RETURNING *",
+    var r = await pool.query(
+      "UPDATE contracts SET status='hunting', posted_by=$1 WHERE id=$2 AND channel_id=$3 AND status='active' RETURNING *",
+      [req.userId, req.params.id, channelId]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Contract not found or already claimed' });
+    res.json({ success: true, contract: r.rows[0] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── SUBMIT CLIP ───────────────────────────────────────────
+app.post('/api/submissions', writeLimiter, verifyExtensionJwt, async function(req, res) {
+  var channelId    = req.channelId;
+  var b            = req.body;
+  if (!b.contract_id || !b.clip_url) return res.status(400).json({ error: 'contract_id and clip_url required' });
+
+  // Idempotency — block duplicate transaction IDs
+  if (b.transaction_id) {
+    var dupe = await pool.query('SELECT id FROM submissions WHERE transaction_id=$1', [b.transaction_id]);
+    if (dupe.rows.length > 0) return res.status(409).json({ error: 'Duplicate transaction', existing: dupe.rows[0].id });
+  }
+
+  try {
+    var contract = await pool.query('SELECT * FROM contracts WHERE id=$1 AND channel_id=$2', [b.contract_id, channelId]);
+    if (contract.rows.length === 0) return res.status(404).json({ error: 'Contract not found' });
+
+    var id          = uid();
+    var voteCloses  = new Date(Date.now() + 8 * 3600 * 1000); // 8-hour vote window
+    await pool.query(
+      `INSERT INTO submissions (id,contract_id,channel_id,clip_url,notes,submitted_by,vote_closes_at,transaction_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [id, b.contract_id, channelId, b.clip_url, b.notes||'', req.userId, voteCloses, b.transaction_id||null]
+    );
+
+    var sub = (await pool.query('SELECT * FROM submissions WHERE id=$1', [id])).rows[0];
+    await pubsubBroadcast(channelId, { type: 'submission_posted', submission: sub });
+    res.json({ success: true, submission: sub });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET SUBMISSIONS ───────────────────────────────────────
+app.get('/api/submissions', verifyExtensionJwt, async function(req, res) {
+  var channelId = req.channelId;
+  try {
+    var r = await pool.query(
+      "SELECT * FROM submissions WHERE channel_id=$1 ORDER BY submitted_at DESC LIMIT 30",
+      [channelId]
+    );
+    res.json({ submissions: r.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET GLOBAL SUBMISSIONS ───────────────────────────────
+app.get('/api/submissions/global', verifyExtensionJwt, async function(req, res) {
+  try {
+    var r = await pool.query(
+      "SELECT s.*, c.target, c.game, c.bits_amount FROM submissions s JOIN contracts c ON c.id=s.contract_id WHERE s.status='review' ORDER BY s.submitted_at DESC LIMIT 50"
+    );
+    res.json({ submissions: r.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── VOTE ──────────────────────────────────────────────────
+app.post('/api/submissions/:id/vote', writeLimiter, verifyExtensionJwt, async function(req, res) {
+  var channelId = req.channelId;
+  var voterId   = req.userId;
+  var vote      = req.body.vote; // 'approve' or 'reject'
+  if (!vote || !['approve', 'reject'].includes(vote)) return res.status(400).json({ error: 'vote must be approve or reject' });
+
+  try {
+    var sub = await pool.query('SELECT * FROM submissions WHERE id=$1', [req.params.id]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Submission not found' });
+    if (sub.rows[0].status !== 'review') return res.status(400).json({ error: 'Voting closed' });
+
+    // Deduplication via PRIMARY KEY constraint
+    try {
+      await pool.query(
+        'INSERT INTO votes (submission_id,voter_id,vote) VALUES ($1,$2,$3)',
+        [req.params.id, voterId, vote]
+      );
+    } catch (e) {
+      if (e.code === '23505') return res.status(409).json({ error: 'Already voted' });
+      throw e;
+    }
+
+    // Recalculate tallies
+    var tally = await pool.query(
+      "SELECT vote, COUNT(*)::int AS n FROM votes WHERE submission_id=$1 GROUP BY vote",
       [req.params.id]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
-    const s = r.rows[0];
-    await pool.query('UPDATE network_contracts SET claimed=true,claimed_by=$1,claimed_at=NOW() WHERE id=$2',
-      [hunter_name || 'unknown', s.contract_id]);
-    const chatChannelId = broadcaster_id || broadcasterUserId || s.channel_id;
+    var approves = 0, rejects = 0;
+    tally.rows.forEach(function(r) {
+      if (r.vote === 'approve') approves = r.n;
+      else rejects = r.n;
+    });
+
+    await pool.query('UPDATE submissions SET approves=$1, rejects=$2 WHERE id=$3', [approves, rejects, req.params.id]);
+
+    // Auto-approve if threshold met (60%+, minimum 5 votes)
+    var total = approves + rejects;
+    if (total >= 5 && (approves / total) >= 0.6) {
+      await pool.query("UPDATE submissions SET status='approved' WHERE id=$1", [req.params.id]);
+      await pubsubBroadcast(channelId, { type: 'submission_approved', submissionId: req.params.id });
+    }
+
+    res.json({ success: true, approves: approves, rejects: rejects });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PAYOUT (broadcaster approves) ─────────────────────────
+app.post('/api/submissions/:id/payout', writeLimiter, verifyExtensionJwt, requireBroadcaster, async function(req, res) {
+  var channelId = req.channelId;
+  try {
+    var sub = await pool.query(
+      "SELECT s.*, c.target, c.game, c.bits_amount FROM submissions s JOIN contracts c ON c.id=s.contract_id WHERE s.id=$1 AND s.channel_id=$2",
+      [req.params.id, channelId]
+    );
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    var s = sub.rows[0];
+
+    // Mark paid
+    await pool.query("UPDATE submissions SET status='paid' WHERE id=$1", [req.params.id]);
+    await pool.query("UPDATE contracts SET status='completed' WHERE id=$1", [s.contract_id]);
+
+    var reward = s.bits_amount ? s.bits_amount + ' Bits' : 'reward';
+    var chatStatus = await trySendChat(
+      broadcasterUserId || channelId,
+      '☠ HEAD-HUNTER — BOUNTY COMPLETED! The bounty on @' + s.target + ' has been claimed and paid out! Prize: ' + reward + ' — To the victor goes the spoils! BOUNTY COMPLETED!'
+    );
+
+    await pubsubBroadcast(channelId, {
+      type: 'kill_confirmed',
+      target: s.target,
+      game:   s.game,
+      reward: reward,
+      hunter: s.submitted_by
+    });
+
+    res.json({ success: true, chatStatus: chatStatus });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── REJECT SUBMISSION (broadcaster only) ──────────────────
+app.post('/api/submissions/:id/reject', writeLimiter, verifyExtensionJwt, requireBroadcaster, async function(req, res) {
+  var channelId = req.channelId;
+  try {
+    var r = await pool.query(
+      "UPDATE submissions SET status='rejected' WHERE id=$1 AND channel_id=$2 RETURNING id",
+      [req.params.id, channelId]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Not found or not yours' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── HUNTER PROFILE ────────────────────────────────────────
+app.get('/api/hunter/:userId', async function(req, res) {
+  try {
+    var r = await pool.query(
+      `SELECT
+         COUNT(CASE WHEN status='paid' THEN 1 END)::int               AS kills,
+         COALESCE(SUM(CASE WHEN s.status='paid' THEN c.bits_amount ELSE 0 END),0)::int AS bits_earned,
+         COUNT(*)::int                                                  AS total_submissions,
+         COUNT(CASE WHEN status IN ('approved','paid') THEN 1 END)::int AS wins
+       FROM submissions s
+       JOIN contracts c ON c.id = s.contract_id
+       WHERE s.submitted_by = $1`,
+      [req.params.userId]
+    );
+    var row = r.rows[0];
+    var win_rate = row.total_submissions > 0 ? Math.round((row.wins / row.total_submissions) * 100) : 0;
+    res.json({ userId: req.params.userId, kills: row.kills, bits_earned: row.bits_earned, total_submissions: row.total_submissions, win_rate: win_rate });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── LEADERBOARD ───────────────────────────────────────────
+app.get('/api/leaderboard', verifyExtensionJwt, async function(req, res) {
+  try {
+    var r = await pool.query(
+      `SELECT s.submitted_by AS user_id,
+              COUNT(CASE WHEN s.status IN ('paid','approved') THEN 1 END)::int AS kills,
+              COALESCE(SUM(CASE WHEN s.status IN ('paid','approved') THEN c.bits_amount ELSE 0 END),0)::int AS bits_earned,
+              COUNT(*)::int AS total_submissions
+       FROM submissions s
+       JOIN contracts c ON c.id = s.contract_id
+       WHERE s.channel_id = $1
+       GROUP BY s.submitted_by
+       ORDER BY bits_earned DESC, kills DESC
+       LIMIT 10`,
+      [req.channelId]
+    );
+    // Enrich with display names from Twitch
+    var rows = r.rows;
+    var ids  = rows.map(function(row) { return row.user_id; }).filter(Boolean);
+    var nameMap = {};
     try {
-      const payMsg = '☠ HEAD-HUNTER — BOUNTY COMPLETED! The bounty on @' + s.target + ' has been claimed! Prize: ' + s.total_reward + ' — To the victor goes the spoils!';
-      let pr = await sendChatMessage(chatChannelId, payMsg, botToken);
-      if (pr.status === 401) { const nt = await refreshBotToken(); await sendChatMessage(chatChannelId, payMsg, nt); }
-    } catch(e) {}
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+      if (ids.length > 0) {
+        var url = 'https://api.twitch.tv/helix/users?' + ids.map(function(id) { return 'id=' + id; }).join('&');
+        var resp = await fetch(url, {
+          headers: { 'Client-ID': clientId, 'Authorization': 'Bearer ' + await getAppToken() }
+        });
+        var data = await resp.json();
+        (data.data || []).forEach(function(u) { nameMap[u.id] = { display_name: u.display_name, login: u.login, avatar: u.profile_image_url }; });
+      }
+    } catch(e) { /* name lookup failed — fall back to user_id */ }
+
+    var enriched = rows.map(function(row) {
+      var info = nameMap[row.user_id] || {};
+      return Object.assign({}, row, {
+        display_name: info.display_name || row.user_id,
+        login:        info.login        || row.user_id,
+        avatar:       info.avatar       || ''
+      });
+    });
+
+    res.json({ leaderboard: enriched });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// ── POST /api/network/submission/:id/reject ───────────────
-app.post('/api/network/submission/:id/reject', async (req, res) => {
-  if (!dbReady) return res.status(503).json({ error: 'Network not available' });
+// ── GET GLOBAL LEADERBOARD ───────────────────────────────
+app.get('/api/leaderboard/global', verifyExtensionJwt, async function(req, res) {
   try {
-    await pool.query("UPDATE network_submissions SET status='rejected' WHERE id=$1", [req.params.id]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    var r = await pool.query(
+      `SELECT s.submitted_by AS user_id,
+              COUNT(CASE WHEN s.status IN ('paid','approved') THEN 1 END)::int AS kills,
+              COALESCE(SUM(CASE WHEN s.status IN ('paid','approved') THEN c.bits_amount ELSE 0 END),0)::int AS bits_earned,
+              COUNT(*)::int AS total_submissions
+       FROM submissions s
+       JOIN contracts c ON c.id = s.contract_id
+       GROUP BY s.submitted_by
+       HAVING COUNT(*) > 0
+       ORDER BY bits_earned DESC, kills DESC
+       LIMIT 20`
+    );
+    var rows = r.rows;
+    var ids  = rows.map(function(row) { return row.user_id; }).filter(Boolean);
+    var nameMap = {};
+    try {
+      if (ids.length > 0) {
+        var url = 'https://api.twitch.tv/helix/users?' + ids.map(function(id) { return 'id=' + id; }).join('&');
+        var resp = await fetch(url, { headers: { 'Client-ID': clientId, 'Authorization': 'Bearer ' + await getAppToken() } });
+        var data = await resp.json();
+        (data.data || []).forEach(function(u) { nameMap[u.id] = { display_name: u.display_name, login: u.login, avatar: u.profile_image_url }; });
+      }
+    } catch(e) { console.error('[leaderboard] Name lookup failed:', e.message); }
+    var enriched = rows.map(function(row) {
+      var info = nameMap[row.user_id] || {};
+      return Object.assign({}, row, {
+        display_name: info.display_name || row.user_id,
+        login:        info.login        || row.user_id,
+        avatar:       info.avatar       || ''
+      });
+    });
+    console.log('[leaderboard] Returning', enriched.length, 'rows, nameMap keys:', Object.keys(nameMap).length);
+    res.json({ leaderboard: enriched });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-
-// ── POST /api/network/leaderboard/clear ───────────────────
-// Resets all claimed data so leaderboard starts fresh
-// Protected by ADMIN_SECRET env var
-app.post('/api/network/leaderboard/clear', async (req, res) => {
-  const secret = process.env.ADMIN_SECRET || 'headhunter-admin';
-  if (req.body.secret !== secret) return res.status(403).json({ error: 'Forbidden' });
-  if (!dbReady) return res.status(503).json({ error: 'Network not available' });
+// ── ADMIN RESET (one-time use, remove after) ─────────────
+app.post('/api/admin/reset', verifyExtensionJwt, requireBroadcaster, async function(req, res) {
   try {
-    // Reset claimed fields on all contracts — leaderboard pulls from claimed_by
-    await pool.query('UPDATE network_contracts SET claimed=false, claimed_by=NULL, claimed_at=NULL');
-    // Delete all submissions so vote history is clean too
-    await pool.query('DELETE FROM network_submissions');
-    await pool.query('DELETE FROM network_votes');
-    console.log('[admin] Leaderboard and submissions cleared');
-    res.json({ success: true, message: 'Leaderboard cleared — fresh start!' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    await pool.query('DELETE FROM votes');
+    await pool.query('DELETE FROM submissions');
+    await pool.query('DELETE FROM contracts');
+    console.log('[admin] All data wiped');
+    res.json({ success: true, message: 'All contracts, submissions and votes cleared' });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// ── GET /api/network/leaderboard ──────────────────────────
-app.get('/api/network/leaderboard', async (req, res) => {
-  if (!dbReady) return res.json({ leaderboard: [] });
+// ── DEBUG LEADERBOARD ─────────────────────────────────────
+app.get('/api/debug/leaderboard', verifyExtensionJwt, async function(req, res) {
   try {
-    const r = await pool.query(`
-      SELECT claimed_by AS hunter, COUNT(*) AS kills, SUM(bits_amount) AS total_bits
-      FROM network_contracts WHERE claimed=true AND claimed_by IS NOT NULL
-      GROUP BY claimed_by ORDER BY kills DESC, total_bits DESC LIMIT 20
-    `);
-    res.json({ leaderboard: r.rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    var r = await pool.query('SELECT submitted_by, status FROM submissions LIMIT 20');
+    res.json({ submissions: r.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── GET /api/network/poll ─────────────────────────────────
-// Lightweight check — tells client if anything changed since last poll
-app.get('/api/network/poll', async (req, res) => {
-  if (!dbReady) return res.json({ active_contracts: 0, new_contracts: 0, pending_submissions: 0, ts: new Date().toISOString() });
-  const since = req.query.since || new Date(0).toISOString();
-  try {
-    const r = await pool.query(`
-      SELECT
-        (SELECT COUNT(*) FROM network_contracts WHERE claimed=false AND (expires_at IS NULL OR expires_at>NOW())) AS active_contracts,
-        (SELECT COUNT(*) FROM network_contracts WHERE posted_at>$1) AS new_contracts,
-        (SELECT COUNT(*) FROM network_submissions WHERE status='review') AS pending_submissions
-    `, [since]);
-    res.json({ ...r.rows[0], ts: new Date().toISOString() });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+// ═════════════════════════════════════════════════════════
+//  START
+// ═════════════════════════════════════════════════════════
+initDb().then(function() {
+  startCrons();
+  app.listen(PORT, function() {
+    console.log('[HEAD-HUNTER EBS v2.0] Listening on port ' + PORT);
+    console.log('Client ID:         ', process.env.TWITCH_CLIENT_ID ? '✓ set' : '✗ MISSING');
+    console.log('Extension Secret:  ', '✓ set');
+    console.log('Bot User ID:       ', botUserId         ? '✓ ' + botUserId : '✗ not set');
+    console.log('Bot Token:         ', botToken          ? '✓ set'          : '✗ not set');
+    console.log('Broadcaster ID:    ', broadcasterUserId ? '✓ ' + broadcasterUserId : '✗ not set');
+    console.log('Database:          ', process.env.DATABASE_URL ? '✓ connected' : '✗ MISSING');
+  });
+}).catch(function(err) {
+  console.error('[FATAL] DB init failed:', err.message);
+  process.exit(1);
 });
-
-// ─── START ────────────────────────────────────────────────
-initDb().catch(err => console.error('[db] Init failed (non-fatal):', err.message));
-
-app.listen(PORT, () => {
-  console.log('HEAD-HUNTER EBS running on port ' + PORT);
-  console.log('Client ID:',       process.env.TWITCH_CLIENT_ID     ? '✓ set' : '✗ MISSING');
-  console.log('Client Secret:',   process.env.TWITCH_CLIENT_SECRET ? '✓ set' : '✗ MISSING');
-  console.log('Bot User ID:',     botUserId         ? '✓ set' : '✗ not set (chat disabled)');
-  console.log('Bot Token:',       botToken          ? '✓ set' : '✗ not set (chat disabled)');
-  console.log('Broadcaster ID:',  broadcasterUserId ? '✓ set (' + broadcasterUserId + ')' : 'not set (per-channel fallback)');
-  console.log('Network DB:',      process.env.DATABASE_URL ? '✓ connecting...' : '✗ not set (local mode only)');
-  console.log('SE Channel ID:',   SE_CHANNEL ? '✓ set' : '✗ not set (SE disabled)');
-  console.log('SE JWT:',          SE_JWT     ? '✓ set' : '✗ not set (SE disabled)');
-});
-
