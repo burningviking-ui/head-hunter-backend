@@ -704,16 +704,15 @@ app.get('/api/leaderboard/global', verifyExtensionJwt, async function(req, res) 
 });
 
 // ── ADMIN RESET ──────────────────────────────────────────
-app.post('/api/admin/reset', async function(req, res) {
-  if (req.headers['x-admin-key'] !== 'hh-reset-2026') return res.status(403).json({ error: 'Forbidden' });
+app.get('/api/admin/reset/hh-reset-2026', async function(req, res) {
   try {
     await pool.query('DELETE FROM votes');
     await pool.query('DELETE FROM submissions');
     await pool.query('DELETE FROM contracts');
     console.log('[admin] All data wiped');
-    res.json({ success: true, message: 'All data cleared' });
+    res.send('<h2>✅ All data cleared!</h2><p>Contracts, submissions and votes deleted.</p>');
   } catch(e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).send('<h2>❌ Error: ' + e.message + '</h2>');
   }
 });
 
